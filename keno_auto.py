@@ -133,21 +133,36 @@ def find_draws(obj, out=None):
 # ------------------------------------------------------------------ browser side
 PAGE_JS = r"""
 () => {
+  // Works on both the Hot Spot page and past-winning-numbers?query=NNNNNNN.
+  // CA Lottery renders the 20 numbers twice: a screen-reader list (19 numbers + "Bulls-eye number is NN")
+  // and a visual 80-cell grid with the drawn ones marked blue-num.
   const txt = document.body ? document.body.innerText : '';
-  const m = txt.match(/Current Draw Number:?\s*([0-9]{5,})/i) || txt.match(/Draw\s*#?\s*([0-9]{6,})/i);
-  const b = txt.match(/Bulls-?eye(?: number)?(?: is)?:?\s*([0-9]{1,2})/i);
-  // runs of consecutive elements whose text is a single number 1..80
-  const els = Array.from(document.querySelectorAll('li, span, div, td'))
-      .filter(e => e.children.length === 0 && /^\s*\d{1,2}\s*$/.test(e.textContent) && +e.textContent >= 1 && +e.textContent <= 80);
-  const runs = []; let cur = [];
-  for (const e of els) {
-    const p = e.parentElement && e.parentElement.parentElement;
-    if (cur.length && cur[cur.length-1].p !== p) { runs.push(cur); cur = []; }
-    cur.push({p, n: +e.textContent.trim()});
+  const el = document.querySelector('.current-drawNumber');
+  let draw = el ? el.textContent.trim() : null;
+  if (!draw) { const m = txt.match(/Draw\s*(?:Number|#)\s*:?\s*([0-9]{7})/i); draw = m ? m[1] : null; }
+  const dm = txt.match(/Draw Date:?\s*([A-Za-z]{3,9}\.? \d{1,2},? \d{4})/i);
+  const tm = txt.match(/Draw Time:?\s*([0-9]{1,2}:[0-9]{2}\s*[ap]\.?m\.?)/i) || txt.match(/at\s+([0-9]{1,2}:[0-9]{2}\s*[ap]\.?m\.?)/i);
+  let best = null;
+  for (const ul of document.querySelectorAll('ul')) {
+    const nums = []; let be = null;
+    for (const li of ul.querySelectorAll(':scope > li')) {
+      const t = li.textContent.replace(/\s+/g, ' ').trim();
+      let m = t.match(/^(\d{1,2})$/);
+      if (m) { nums.push(+m[1]); continue; }
+      m = t.match(/Bulls-?eye[^0-9]*(\d{1,2})\s*$/i);
+      if (m) { be = +m[1]; nums.push(be); }
+    }
+    if (nums.length === 20 && (!best || (be && !best.be))) best = {nums, be};
   }
-  if (cur.length) runs.push(cur);
-  const cands = runs.map(r => r.map(x => x.n)).filter(r => r.length >= 20 && r.length <= 21);
-  return {draw: m ? m[1] : null, bullseye: b ? +b[1] : null, runs: cands.slice(0, 3)};
+  if (!best) {  // fallback: the blue cells of the visual grid
+    const blue = Array.from(document.querySelectorAll('li.blue-num')).map(li => +li.textContent.trim());
+    if (blue.length === 20) {
+      const b = txt.match(/Bulls-?eye number is[^0-9]{0,20}(\d{1,2})/i);
+      best = {nums: blue, be: b ? +b[1] : null};
+    }
+  }
+  return {draw, date: dm ? dm[1] + (tm ? ' ' + tm[1] : '') : null,
+          nums: best ? best.nums : null, bullseye: best ? best.be : null};
 }
 """
 
@@ -233,13 +248,15 @@ class Collector:
                     pass
                 return gid
         self.active = False
+        kdb.meta_set(self.con, "hotspot_game_id", -1)  # remember "no API" so we don't probe every start
+        self.cfg["hotspot_game_id"] = -1
         dump_debug("api_probe.json", found)
         log.warning("Hot Spot API id not found — falling back to reading the page")
         return None
 
     def poll_api(self):
         gid = self.cfg.get("hotspot_game_id")
-        if not gid:
+        if not gid or gid < 0:
             return None
         known = kdb.latest_draw_id(self.con) or 0
         got = []
@@ -258,20 +275,68 @@ class Collector:
         self.active = False
         return self.store(got, "api")
 
+    def read_page(self, page=None):
+        page = page or self.page
+        r = page.evaluate(PAGE_JS)
+        if not r.get("draw") or not r.get("nums") or len(set(r["nums"])) != 20:
+            return None, r
+        be = r.get("bullseye")
+        if be is not None and be not in r["nums"]:
+            be = None
+        return (int(r["draw"]), sorted(r["nums"]), be, r.get("date")), r
+
     def poll_page(self):
         if time.time() - self.last_reload > 50:
             self.open_page()
-        r = self.page.evaluate(PAGE_JS)
-        if not r.get("draw") or not r.get("runs"):
+        d, raw = self.read_page()
+        if not d:
             dump_debug("page_last_fail.html", self.page.content())
-            dump_debug("page_last_fail.json", r)
+            dump_debug("page_last_fail.json", raw)
             return None
-        run = r["runs"][0]
-        be = r.get("bullseye")
-        nums = run[:20]
-        if len(run) == 21 and be is None:
-            be = run[20]
-        return self.store([(int(r["draw"]), nums, be, dt.date.today().isoformat())], "page")
+        got = self.backfill(d[0]) + [d]
+        return self.store(got, "page")
+
+    def backfill(self, current):
+        """Fetch draws we missed (PC asleep, or GitHub's 30-min gap) one by one from
+        past-winning-numbers?query=NNNNNNN, oldest first."""
+        live_max = self.con.execute("SELECT MAX(draw_id) FROM draws WHERE source!='import'").fetchone()[0]
+        cap = self.cfg.get("backfill_max_draws", 150)
+        start = (live_max + 1) if live_max else current - self.cfg.get("first_run_backfill", 60)
+        start = max(start, current - cap)
+        ids = list(range(start, current))
+        if not ids:
+            return []
+        out, fails = [], 0
+        bp = self.page.context.new_page()
+        bp.route("**/*", lambda r: r.abort() if r.request.resource_type in ("image", "media", "font", "stylesheet", "script") else r.continue_())
+        try:
+            for did in ids:
+                url = f"{self.cfg['past_url']}?query={did}"
+                try:
+                    bp.goto(url, wait_until="domcontentloaded", timeout=45000)
+                    d, raw = self.read_page(bp)
+                    if not d and raw.get("nums") and len(set(raw["nums"])) == 20 and str(did) in bp.inner_text("body"):
+                        d = (did, sorted(raw["nums"]), raw.get("bullseye"), raw.get("date"))
+                    if d and d[0] != did and str(did) in bp.inner_text("body"):
+                        d = (did,) + d[1:]  # page header shows the latest draw; the body shows the one we asked for
+                    if d and d[0] == did:
+                        out.append(d)
+                        continue
+                    fails += 1
+                    if fails == 1:
+                        dump_debug("past_last_fail.html", bp.content())
+                        dump_debug("past_last_fail.json", raw)
+                except Exception as e:
+                    fails += 1
+                    log.warning("backfill %s failed: %s", did, e)
+                if fails >= 5 and not out:
+                    log.warning("backfill not working — giving up this round")
+                    break
+        finally:
+            bp.close()
+        if out:
+            log.info("backfilled %d of %d missed draw(s)", len(out), len(ids))
+        return out
 
     def store(self, draws, source):
         prev_max = kdb.latest_draw_id(self.con) or 0
@@ -321,7 +386,7 @@ def run_forever():
         col = Collector(cfg, con)
         try:
             col.start()
-            if not cfg.get("hotspot_game_id"):
+            if cfg.get("hotspot_game_id") is None:
                 col.discover_game_id()
             log.info("collector started")
             backoff = 30
@@ -329,7 +394,7 @@ def run_forever():
                 col.poll()
                 n = con.execute("SELECT COUNT(*) FROM draws").fetchone()[0]
                 write_status(state="running", draws_logged=n, latest_draw=kdb.latest_draw_id(con),
-                             mode="api" if cfg.get("hotspot_game_id") else "page")
+                             mode="api" if (cfg.get("hotspot_game_id") or 0) > 0 else "page")
                 if time.time() - last_report > cfg.get("report_every_minutes", 60) * 60:
                     report.build(con, cfg)
                     last_report = time.time()
@@ -395,7 +460,7 @@ def run_once():
     ok = False
     try:
         col.start()
-        if not cfg.get("hotspot_game_id"):
+        if cfg.get("hotspot_game_id") is None:
             col.discover_game_id()
         col.poll()
         ok = True
@@ -412,7 +477,7 @@ def run_once():
     n = con.execute("SELECT COUNT(*) FROM draws").fetchone()[0]
     write_status(state="ok" if ok and after > before else ("no-new-draws" if ok else "error"),
                  draws_logged=n, latest_draw=after, new_this_run=after - before if before else None,
-                 mode="api" if cfg.get("hotspot_game_id") else "page", runner="github")
+                 mode="api" if (cfg.get("hotspot_game_id") or 0) > 0 else "page", runner="github")
     export_csv(con)
     report.build(con, cfg, archive_day=dt.date.today())
     log.info("batch done: latest %s (was %s), %d draws total", after, before, n)
