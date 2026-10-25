@@ -163,6 +163,101 @@ def fmt_p(p):
     return "—" if p is None else ("<0.001" if p < 0.001 else f"{p:.3f}")
 
 
+
+# ---------------------------------------------------------------- upcoming draws + prediction log
+import re as _re
+try:
+    from zoneinfo import ZoneInfo
+    _PT = ZoneInfo("America/Los_Angeles")
+except Exception:  # no tz database: assume the machine runs on Pacific time
+    _PT = None
+_MONTHS = {m: i for i, m in enumerate(["jan", "feb", "mar", "apr", "may", "jun", "jul", "aug", "sep", "oct", "nov", "dec"], 1)}
+
+
+def draw_epoch(text):
+    """'October 25, 2026 9:56 a.m.' / 'Oct 25, 2026 3:20 p.m.' -> epoch ms (Pacific), or None."""
+    if not text:
+        return None
+    m = _re.search(r"([A-Za-z]{3})[a-z]*\.?\s+(\d{1,2}),?\s+(\d{4})\s+(\d{1,2}):(\d{2})\s*([ap])", text, _re.I)
+    if not m:
+        return None
+    mon = _MONTHS.get(m.group(1).lower())
+    h = int(m.group(4)) % 12 + (12 if m.group(6).lower() == "p" else 0)
+    t = dt.datetime(int(m.group(3)), mon, int(m.group(2)), h, int(m.group(5)), tzinfo=_PT)
+    return int(t.timestamp() * 1000)
+
+
+def suggested_engine(tab):
+    cands = [r for r in tab if r["spot"] == 10 and r["engine"] != "RANDOM" and r["n"] >= 200]
+    if not cands:
+        return "HOT", None
+    best = max(cands, key=lambda r: r["z"])
+    return best["engine"], best
+
+
+def upcoming(con):
+    row = con.execute("SELECT draw_id, draw_date FROM draws WHERE source!='import' AND draw_date IS NOT NULL "
+                      "ORDER BY draw_id DESC LIMIT 1").fetchone()
+    base_id, base_ms = (row[0], draw_epoch(row[1])) if row else (None, None)
+    rows = con.execute("""SELECT p.target_draw, p.basis_draw, p.engine, p.ranked, p.created_at FROM predictions p
+                          WHERE p.target_draw NOT IN (SELECT draw_id FROM draws) ORDER BY p.target_draw""").fetchall()
+    targets = {}
+    for t, b, en, rk, created in rows:
+        d = targets.setdefault(t, {"draw": t, "basis": b, "locked": created, "picks": {},
+                                   "eta": (base_ms + (t - base_id) * 240000) if base_ms else None})
+        d["picks"][en] = json.loads(rk)
+    return {"latest": base_id, "latest_ms": base_ms, "targets": list(targets.values())}
+
+
+def prediction_log(con, limit=40):
+    draws = con.execute("""SELECT DISTINCT r.target_draw, d.draw_date, d.numbers, d.bullseye FROM results r
+                           JOIN draws d ON d.draw_id=r.target_draw WHERE r.valid=1
+                           ORDER BY r.target_draw DESC LIMIT ?""", (limit,)).fetchall()
+    out = []
+    for did, date, nums, be in draws:
+        hits = dict(con.execute("SELECT engine, hits FROM results WHERE target_draw=? AND spot=10 AND valid=1",
+                                (did,)).fetchall())
+        kind = con.execute("SELECT kind FROM predictions WHERE target_draw=? LIMIT 1", (did,)).fetchone()
+        best = con.execute("""SELECT engine, spot, hits, pay_hotspot, pay_bullseye FROM results WHERE target_draw=? AND valid=1
+                              ORDER BY pay_hotspot + pay_bullseye DESC, hits DESC LIMIT 1""", (did,)).fetchone()
+        out.append(dict(draw=did, date=date, numbers=json.loads(nums), bullseye=be, hits=hits,
+                        kind=kind[0] if kind else "", best=best))
+    return out
+
+
+UP_JS = r"""<script>
+(function(){
+  var D; try { D = JSON.parse(document.getElementById('updata').textContent); } catch(e) { return; }
+  var spot = 10; try { spot = +localStorage.getItem('kenoSpot') || 10; } catch(e) {}
+  var box = document.getElementById('up');
+  function tm(ms){ return new Date(ms).toLocaleTimeString('en-US',{hour:'numeric',minute:'2-digit',timeZone:'America/Los_Angeles'}); }
+  function render(){
+    var now = Date.now();
+    var live = D.targets.filter(function(t){ return !t.eta || t.eta > now - 30000; }).slice(0, 5);
+    if (!live.length) { box.innerHTML = '<div class="grp muted">Các kỳ đã khóa đều đã quay xong. Bộ số mới sẽ có sau lần cập nhật kế tiếp (thường trong ~15 phút) — trang tự tải lại.</div>'; return; }
+    var groups = {}; live.forEach(function(t){ (groups[t.basis] = groups[t.basis] || []).push(t); });
+    var html = '';
+    Object.keys(groups).forEach(function(b){
+      var ts = groups[b], p = ts[0].picks, s = D.suggested;
+      html += '<div class="grp"><div class="chips">' + ts.map(function(t, i){
+        var left = t.eta ? Math.max(0, Math.round((t.eta - now) / 1000)) : null;
+        var lab = '#' + t.draw + (t.eta ? ' · ~' + tm(t.eta) + (left !== null && left < 600 ? ' · còn ' + Math.floor(left/60) + ':' + ('0'+left%60).slice(-2) : '') : '');
+        return '<span class="chip' + (i === 0 ? ' now' : '') + '">' + lab + '</span>'; }).join('') + '</div>';
+      html += '<div class="muted" style="font-size:12px">GỢI Ý · <b style="color:' + D.colors[s] + '">' + s + '</b> · vé ' + spot + ' số · khóa từ kỳ #' + b + '</div>';
+      html += '<div class="sug">' + p[s].slice(0, spot).map(function(n){ return '<div class="ball">' + n + '</div>'; }).join('') + '</div>';
+      html += '<div class="spots">' + [5,6,7,8,9,10].map(function(k){ return '<button data-k="' + k + '" class="' + (k === spot ? 'on' : '') + '">' + k + ' số</button>'; }).join('') + '</div>';
+      html += '<div class="others">' + D.order.filter(function(e){ return e !== s && p[e]; }).map(function(e){
+        return '<div><b style="color:' + D.colors[e] + '">' + e + '</b>' + p[e].slice(0, spot).join(' ') + '</div>'; }).join('') + '</div></div>';
+    });
+    box.innerHTML = html;
+    box.querySelectorAll('.spots button').forEach(function(bt){ bt.onclick = function(){ spot = +bt.dataset.k; try { localStorage.setItem('kenoSpot', spot); } catch(e) {} render(); }; });
+  }
+  render(); setInterval(render, 1000);
+})();
+</script>
+"""
+
+
 def build(con, cfg, archive_day=None):
     os.makedirs(OUT, exist_ok=True)
     alpha = cfg.get("significance_alpha", 0.05)
@@ -242,9 +337,38 @@ def build(con, cfg, archive_day=None):
         next_html = (f"<h2>Vé đã khóa cho kỳ #{nxt[0][0]}</h2><p class='muted'>Khóa lúc {e(nxt[0][3])}, trước khi kỳ quay diễn ra. "
                      f"Vé k số = k số đầu tiên.</p><div class='picks'>{cards}</div>")
 
+    sug, sug_row = suggested_engine(tab)
+    up = upcoming(con)
+    up["suggested"] = sug
+    up["order"] = list(engines.ENGINES)
+    up["colors"] = COLORS
+    sug_txt = (f"Gợi ý = engine có thành tích vé 10 số tốt nhất tới giờ: <b>{sug}</b> "
+               f"(z = {sug_row['z']:+.2f}, {sug_row['n']:,} kỳ — {e(sug_row['verdict'])})." if sug_row else
+               "Chưa đủ 200 kỳ để xếp hạng — tạm gợi ý HOT.")
+    upcoming_html = f"""<h2>Số gợi ý · các kỳ sắp tới</h2>
+<div id="up" class="up"></div>
+<p class="note">{sug_txt} Mỗi bộ số chỉ dùng dữ liệu tới kỳ được ghi trên thẻ và dùng chung cho tối đa {cfg.get('lock_horizon', 8)} kỳ kế tiếp
+(giống vé Hot Spot nhiều kỳ). Giờ quay là ước tính (4 phút/kỳ). Kỳ đã qua tự ẩn. Không engine nào được chứng minh là đoán tốt hơn ngẫu nhiên —
+mỗi vé $1 trung bình chỉ trả lại khoảng 62¢.</p>
+<script type="application/json" id="updata">{json.dumps(up)}</script>"""
+    log_rows = []
+    for L in prediction_log(con):
+        cells = "".join(
+            (f"<td class='big'>{L['hits'][n]}</td>" if L['hits'].get(n, 0) >= 6 else f"<td>{L['hits'].get(n, '—')}</td>")
+            for n in engines.ENGINES)
+        b = L["best"]
+        best_txt = f"{b[0]} {b[2]}/{b[1]} · ${b[3] + b[4]:,.0f}" if b and (b[3] + b[4]) > 0 else "—"
+        log_rows.append(f"<tr><td>#{L['draw']}</td><td>{e(str(L['date'] or ''))}</td><td class='muted'>{'trực tiếp' if L['kind']=='live' else 'walk-fwd'}</td>"
+                        f"{cells}<td>{best_txt}</td></tr>")
+    log_html = (f"<h2>Nhật ký dự đoán · 40 kỳ gần nhất (số trúng trên vé 10 số)</h2>"
+                f"<div class='scroll'><table><tr><th>Kỳ</th><th>Giờ quay</th><th>Loại vé</th>"
+                + "".join(f"<th>{n}</th>" for n in engines.ENGINES) +
+                f"<th>Thắng lớn nhất / $1</th></tr>{''.join(log_rows)}</table></div>"
+                "<p class='note'>Ô xanh = trúng ≥ 6/10. Kỳ vọng ngẫu nhiên 2.5/10.</p>")
+
     theo = " · ".join(f"{k} số: {theo_return(k)*100:.1f}%" for k in cfg.get("spots", [5, 6, 7, 8, 9, 10]))
     page = f"""<!doctype html><html lang="vi"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
-<title>KenoAuto Report</title><meta http-equiv="refresh" content="300">
+<title>KenoAuto Report</title><meta http-equiv="refresh" content="180">
 <style>
 :root{{--bg:#07090b;--panel:#0d1116;--line:#1b2127;--fg:#d7dee4;--muted:#7d8a95;--green:#3ddc97;--amber:#f5a524;--red:#ff6b5b}}
 *{{box-sizing:border-box}}body{{margin:0;background:var(--bg);color:var(--fg);font:14px/1.5 ui-monospace,Consolas,monospace}}
@@ -260,10 +384,17 @@ td:first-child,th:first-child,td:last-child,th:last-child{{text-align:left}}tr.g
 .chart .band{{stroke:#5a4415;stroke-dasharray:4 4}}.chart .zero{{stroke:#2a323a}}.chart .ax{{fill:var(--muted);font-size:11px}}
 .legend{{display:flex;flex-wrap:wrap;gap:14px;margin-top:8px;font-size:12px}}.legend i{{display:inline-block;width:10px;height:10px;border-radius:2px;margin-right:6px}}
 .picks{{display:grid;grid-template-columns:repeat(auto-fit,minmax(260px,1fr));gap:8px}}.pick{{background:var(--panel);border:1px solid var(--line);border-radius:6px;padding:9px 12px}}.pick span{{display:block;margin-top:3px;letter-spacing:.04em}}
-.bar{{height:8px;border-radius:2px}}table.small td:last-child{{width:40%}}.note{{color:var(--muted);font-size:12.5px;max-width:880px}}
+.bar{{height:8px;border-radius:2px}}
+td.big{{color:#05100b;background:var(--green);font-weight:700}}
+.up{{display:grid;gap:10px}}.grp{{background:var(--panel);border:1px solid var(--line);border-radius:8px;padding:14px}}
+.chips{{display:flex;flex-wrap:wrap;gap:6px;margin-bottom:12px}}.chip{{border:1px solid var(--line);border-radius:14px;padding:3px 10px;font-size:12px}}.chip.now{{border-color:var(--green);color:var(--green)}}
+.sug{{display:flex;flex-wrap:wrap;gap:8px;margin:6px 0 4px}}.ball{{width:44px;height:44px;border-radius:50%;display:flex;align-items:center;justify-content:center;font-size:17px;font-weight:700;background:#132a20;color:var(--green);border:2px solid var(--green)}}
+.spots{{display:flex;flex-wrap:wrap;gap:4px;margin:10px 0}}.spots button{{white-space:nowrap;background:var(--bg);color:var(--muted);border:1px solid var(--line);border-radius:4px;padding:4px 10px;font:inherit;cursor:pointer}}.spots button.on{{color:var(--green);border-color:var(--green)}}
+.others{{display:grid;grid-template-columns:repeat(auto-fit,minmax(250px,1fr));gap:4px 16px;margin-top:10px;font-size:12.5px}}.others b{{display:inline-block;width:92px}}table.small td:last-child{{width:40%}}.note{{color:var(--muted);font-size:12.5px;max-width:880px}}
 </style></head><body><main>
 <h1>KENOAUTO · HOT SPOT</h1>
 <div class="muted">Cập nhật {kdb.now_str()} · {live[0]:,} kỳ log tự động (mới nhất {e(str(live[1]))}) · {imported:,} kỳ cũ nhập làm lịch sử · trạng thái: {e(str(status.get('state','?')))} ({e(str(status.get('mode','')))}{' · GitHub' if status.get('runner')=='github' else ''})<br>{e(kinds_txt)}</div>
+{upcoming_html}
 <h2>Kết luận</h2><div class="head">{e(head)}</div>
 <h2>Máy quay có ngẫu nhiên không?</h2>{rnd_html}
 <h2>z-score tích lũy · vé 10 số</h2>{zchart(con)}
@@ -273,8 +404,9 @@ td:first-child,th:first-child,td:last-child,th:last-child{{text-align:left}}tr.g
 <p class="note">p hiệu chỉnh dùng Holm-Bonferroni vì đang thử {len([r for r in tab if r['engine']!='RANDOM'])} tổ hợp cùng lúc — thử càng nhiều, càng dễ có cái "trông nóng" do may. Tỷ lệ trả về lý thuyết của vé Hot Spot $1: {theo}.</p>
 <h2>Theo ngày · TB trúng vé 10 số (kỳ vọng 2.50)</h2>
 <div class="scroll"><table><tr><th>Ngày</th><th>Kỳ log</th><th>Bỏ lỡ</th><th>Kỳ chấm</th>{''.join(f'<th>{n}</th>' for n in names)}</tr>{''.join(day_rows)}</table></div>
+{log_html}
 <h2>PATTERN · AI học được gì</h2>{model_html}
-{next_html}
+{UP_JS}
 </main></body></html>"""
     path = os.path.join(OUT, "latest.html")
     with open(path, "w", encoding="utf-8") as f:

@@ -65,6 +65,28 @@ def lock_predictions(con, cfg, basis_draw, kind="live"):
     return True
 
 
+def lock_ahead(con, cfg, basis_draw, horizon=None):
+    """Lock one ticket per engine for each of the next `horizon` draws, all built from draws <= basis.
+    Same numbers for draws basis+1 … basis+horizon — like a multi-draw Hot Spot ticket."""
+    _ensure_schema(con)
+    horizon = horizon or cfg.get("lock_horizon", 8)
+    targets = [t for t in range(basis_draw + 1, basis_draw + horizon + 1)
+               if not con.execute("SELECT 1 FROM predictions WHERE target_draw=?", (t,)).fetchone()
+               and not con.execute("SELECT 1 FROM draws WHERE draw_id=?", (t,)).fetchone()]
+    if not targets:
+        return 0
+    hist = kdb.history(con, upto_draw=basis_draw, limit=2000)
+    if len(hist) < 30 or hist[-1][0] != basis_draw:
+        return 0
+    picks = engines.predict_all(hist, load_ctx(con, cfg, basis_draw))
+    ts = kdb.now_str()
+    con.executemany(
+        "INSERT OR IGNORE INTO predictions(target_draw,basis_draw,engine,ranked,created_at,kind) VALUES(?,?,?,?,?,?)",
+        [(t, basis_draw, e, json.dumps(r), ts, "live") for t in targets for e, r in picks.items()])
+    con.commit()
+    return len(targets)
+
+
 def settle(con, cfg, draw_id):
     _ensure_schema(con)
     row = con.execute("SELECT numbers, bullseye, captured_at FROM draws WHERE draw_id=?", (draw_id,)).fetchone()
@@ -100,4 +122,4 @@ def on_new_draws(con, cfg, new_ids, prev_max=None):
     latest = kdb.latest_draw_id(con)
     if latest:
         maybe_retrain(con, cfg, upto=latest)
-        lock_predictions(con, cfg, latest, kind="live")
+        lock_ahead(con, cfg, latest)

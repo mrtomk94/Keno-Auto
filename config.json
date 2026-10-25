@@ -1,7 +1,6 @@
 {
   "page_url": "https://www.calottery.com/en/draw-games/hot-spot",
   "api_base": "https://www.calottery.com/api/DrawGameApi/DrawGamePastDrawResults",
-  "past_url": "https://www.calottery.com/en/draw-games/hot-spot/past-winning-numbers",
   "hotspot_game_id": -1,
   "browser_channel": "msedge",
   "headless": true,
@@ -9,11 +8,20 @@
   "page_reload_minutes": 30,
   "backfill_max_pages": 20,
   "api_page_size": 50,
-  "backfill_max_draws": 300,
-  "first_run_backfill": 260,
-  "spots": [5, 6, 7, 8, 9, 10],
+  "spots": [
+    5,
+    6,
+    7,
+    8,
+    9,
+    10
+  ],
   "hot_window": 30,
   "pattern_retrain_every": 100,
   "report_every_minutes": 60,
-  "significance_alpha": 0.05
+  "significance_alpha": 0.05,
+  "past_url": "https://www.calottery.com/en/draw-games/hot-spot/past-winning-numbers",
+  "backfill_max_draws": 300,
+  "first_run_backfill": 260,
+  "lock_horizon": 12
 }

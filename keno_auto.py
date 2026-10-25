@@ -456,6 +456,7 @@ def run_once():
     con = kdb.connect()
     import report
     before = kdb.latest_draw_id(con) or 0
+    count_before = con.execute("SELECT COUNT(*) FROM draws").fetchone()[0]
     col = Collector(cfg, con)
     ok = False
     try:
@@ -476,7 +477,7 @@ def run_once():
     after = kdb.latest_draw_id(con) or 0
     n = con.execute("SELECT COUNT(*) FROM draws").fetchone()[0]
     write_status(state="ok" if ok and after > before else ("no-new-draws" if ok else "error"),
-                 draws_logged=n, latest_draw=after, new_this_run=after - before if before else None,
+                 draws_logged=n, latest_draw=after, new_this_run=n - count_before,
                  mode="api" if (cfg.get("hotspot_game_id") or 0) > 0 else "page", runner="github")
     export_csv(con)
     report.build(con, cfg, archive_day=dt.date.today())
