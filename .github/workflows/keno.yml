@@ -4,7 +4,7 @@ name: KenoAuto
 
 on:
   schedule:
-    - cron: "7,37 * * * *"   # every 30 min (GitHub may start it a few minutes late — backfill covers that)
+    - cron: "2,17,32,47 * * * *"   # every 30 min (GitHub may start it a few minutes late — backfill covers that)
   workflow_dispatch:          # "Run workflow" button
 
 permissions:
