@@ -1,0 +1,2 @@
+playwright>=1.47
+numpy>=1.26

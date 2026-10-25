@@ -1,0 +1,16 @@
+{
+  "page_url": "https://www.calottery.com/en/draw-games/hot-spot",
+  "api_base": "https://www.calottery.com/api/DrawGameApi/DrawGamePastDrawResults",
+  "hotspot_game_id": null,
+  "browser_channel": "msedge",
+  "headless": true,
+  "poll_seconds": 60,
+  "page_reload_minutes": 30,
+  "backfill_max_pages": 20,
+  "api_page_size": 50,
+  "spots": [5, 6, 7, 8, 9, 10],
+  "hot_window": 30,
+  "pattern_retrain_every": 100,
+  "report_every_minutes": 60,
+  "significance_alpha": 0.05
+}
