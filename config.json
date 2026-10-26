@@ -23,5 +23,8 @@
   "past_url": "https://www.calottery.com/en/draw-games/hot-spot/past-winning-numbers",
   "backfill_max_draws": 300,
   "first_run_backfill": 260,
-  "lock_horizon": 12
+  "lock_horizon": 12,
+  "history_per_run": 200,
+  "history_target": 60000,
+  "history_delay": 0.5
 }

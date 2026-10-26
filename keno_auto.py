@@ -306,37 +306,76 @@ class Collector:
         ids = list(range(start, current))
         if not ids:
             return []
-        out, fails = [], 0
+        out = self.fetch_ids(ids)
+        if out:
+            log.info("backfilled %d of %d missed draw(s)", len(out), len(ids))
+        return out
+
+    def fetch_ids(self, ids, delay=0.0, give_up_after=5):
+        """Read draws by number from past-winning-numbers?query=NNNNNNN, in the order given."""
+        out, fails, streak = [], 0, 0
         bp = self.page.context.new_page()
         bp.route("**/*", lambda r: r.abort() if r.request.resource_type in ("image", "media", "font", "stylesheet", "script") else r.continue_())
         try:
             for did in ids:
                 url = f"{self.cfg['past_url']}?query={did}"
+                ok = False
                 try:
                     bp.goto(url, wait_until="domcontentloaded", timeout=45000)
                     d, raw = self.read_page(bp)
-                    if not d and raw.get("nums") and len(set(raw["nums"])) == 20 and str(did) in bp.inner_text("body"):
+                    body = bp.inner_text("body")
+                    if not d and raw.get("nums") and len(set(raw["nums"])) == 20 and str(did) in body:
                         d = (did, sorted(raw["nums"]), raw.get("bullseye"), raw.get("date"))
-                    if d and d[0] != did and str(did) in bp.inner_text("body"):
+                    if d and d[0] != did and str(did) in body:
                         d = (did,) + d[1:]  # page header shows the latest draw; the body shows the one we asked for
                     if d and d[0] == did:
                         out.append(d)
-                        continue
-                    fails += 1
-                    if fails == 1:
+                        ok = True
+                    elif fails == 0:
                         dump_debug("past_last_fail.html", bp.content())
                         dump_debug("past_last_fail.json", raw)
                 except Exception as e:
+                    log.warning("draw %s failed: %s", did, e)
+                if ok:
+                    streak = 0
+                else:
                     fails += 1
-                    log.warning("backfill %s failed: %s", did, e)
-                if fails >= 5 and not out:
-                    log.warning("backfill not working — giving up this round")
-                    break
+                    streak += 1
+                    if streak >= give_up_after:
+                        log.warning("fetching past draws not working — stopping this round")
+                        break
+                if delay:
+                    time.sleep(delay)
         finally:
             bp.close()
-        if out:
-            log.info("backfilled %d of %d missed draw(s)", len(out), len(ids))
         return out
+
+    def load_history(self):
+        """Walk BACKWARDS through older draws, a batch per run, to build a large clean history
+        quickly instead of waiting months. Stops at history_target real draws."""
+        per_run = self.cfg.get("history_per_run", 0)
+        target = self.cfg.get("history_target", 60000)
+        if not per_run:
+            return []
+        real = self.con.execute("SELECT COUNT(*), MIN(draw_id) FROM draws WHERE source!='import'").fetchone()
+        if not real[1] or real[0] >= target or kdb.meta_get(self.con, "history_done"):
+            return []
+        floor = kdb.meta_get(self.con, "history_floor") or real[1]
+        ids = [i for i in range(min(floor, real[1]) - 1, min(floor, real[1]) - 1 - per_run, -1) if i > 0]
+        got = self.fetch_ids(ids, delay=self.cfg.get("history_delay", 0.5), give_up_after=10)
+        if not got and ids:
+            kdb.meta_set(self.con, "history_done", {"at": kdb.now_str(), "reason": "no older draws returned"})
+        n = 0
+        for did, nums, be, date in got:
+            try:
+                n += kdb.insert_draw(self.con, did, nums, be, date, "history")
+            except ValueError as e:
+                log.warning("%s", e)
+        if ids:
+            kdb.meta_set(self.con, "history_floor", ids[-1])
+        log.info("history: +%d older draws (now back to #%s, %d real draws total)", n, ids[-1] if ids else "?",
+                 real[0] + n)
+        return got
 
     def store(self, draws, source):
         prev_max = kdb.latest_draw_id(self.con) or 0
@@ -378,6 +417,7 @@ def run_forever():
         return
     cfg = load_cfg()
     con = kdb.connect()
+    dedup_imports(con)
     import report
     last_report = 0
     log_day = dt.date.today()
@@ -440,10 +480,10 @@ def export_csv(con, days=3):
     out = os.path.join(HERE, "data", "draws")
     os.makedirs(out, exist_ok=True)
     dates = [r[0] for r in con.execute(
-        "SELECT DISTINCT substr(captured_at,1,10) FROM draws WHERE source!='import' ORDER BY 1 DESC LIMIT ?", (days,))]
+        "SELECT DISTINCT substr(captured_at,1,10) FROM draws WHERE source IN ('page','api') ORDER BY 1 DESC LIMIT ?", (days,))]
     for d in dates:
         rows = con.execute("SELECT draw_id, draw_date, numbers, bullseye, captured_at, source FROM draws "
-                           "WHERE source!='import' AND substr(captured_at,1,10)=? ORDER BY draw_id", (d,)).fetchall()
+                           "WHERE source IN ('page','api') AND substr(captured_at,1,10)=? ORDER BY draw_id", (d,)).fetchall()
         with open(os.path.join(out, f"{d}.csv"), "w", encoding="utf-8") as f:
             f.write("draw_id,draw_date,numbers,bullseye,captured_at,source\n")
             for did, dd, nums, be, cap, src in rows:
@@ -455,6 +495,7 @@ def run_once():
     cfg = load_cfg()
     con = kdb.connect()
     import report
+    dedup_imports(con)
     before = kdb.latest_draw_id(con) or 0
     count_before = con.execute("SELECT COUNT(*) FROM draws").fetchone()[0]
     col = Collector(cfg, con)
@@ -465,6 +506,11 @@ def run_once():
             col.discover_game_id()
         col.poll()
         ok = True
+        try:
+            if col.load_history():
+                ledger.maybe_retrain(con, cfg, upto=kdb.latest_draw_id(con) or 0)
+        except Exception:
+            log.error("history load failed:\n%s", traceback.format_exc())
     except Exception:
         log.error("run failed:\n%s", traceback.format_exc())
         try:
@@ -485,6 +531,30 @@ def run_once():
     return 0 if ok else 1
 
 
+def dedup_imports(con, min_overlap=12):
+    """The old screen-reader tracker sometimes logged the same draw twice. A fair machine repeats
+    12+ of the previous draw's 20 numbers about once in 15,000 draws, so those rows are capture
+    errors — remove them from the imported history (once per database)."""
+    if kdb.meta_get(con, "import_dedup_v1"):
+        return 0
+    rows = con.execute("SELECT draw_id, numbers FROM draws WHERE source='import' ORDER BY draw_id").fetchall()
+    bad, prev = [], None
+    for did, nums in rows:
+        cur = set(json.loads(nums))
+        if prev is not None and len(cur & prev) >= min_overlap:
+            bad.append(did)
+            continue  # compare the next row with the last GOOD draw
+        prev = cur
+    con.executemany("DELETE FROM draws WHERE draw_id=? AND source='import'", [(b,) for b in bad])
+    con.commit()
+    kdb.meta_set(con, "import_dedup_v1", {"removed": len(bad), "at": kdb.now_str()})
+    if bad:
+        log.info("removed %d duplicate draws from the imported history", len(bad))
+        latest = kdb.latest_draw_id(con) or 0
+        ledger.maybe_retrain(con, load_cfg(), upto=latest, force=True)
+    return len(bad)
+
+
 def import_report(path):
     con = kdb.connect()
     with open(path, encoding="utf-8") as f:
@@ -499,6 +569,7 @@ def import_report(path):
         except (ValueError, KeyError):
             pass
     print(f"imported {n} draws (history only — they are never scored)")
+    print(f"removed {dedup_imports(con)} duplicate draws (screen-capture errors)")
     ledger.maybe_retrain(con, load_cfg(), upto=kdb.latest_draw_id(con) or 0, force=True)
 
 

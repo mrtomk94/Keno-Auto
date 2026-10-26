@@ -83,6 +83,9 @@ def engine_table(con, alpha):
 
 def randomness(con):
     draws = kdb.history(con)
+    real = [d for d in draws if d[0] > 100000]  # imported rows have small fake ids
+    if len(real) >= 3000:
+        draws = real
     T = len(draws)
     if T < 50:
         return None
@@ -111,7 +114,7 @@ def randomness(con):
 
 def daily(con):
     rows = con.execute("""SELECT substr(captured_at,1,10) d, COUNT(*), MIN(draw_id), MAX(draw_id)
-                          FROM draws WHERE source!='import' GROUP BY d ORDER BY d DESC LIMIT 30""").fetchall()
+                          FROM draws WHERE source IN ('page','api') GROUP BY d ORDER BY d DESC LIMIT 30""").fetchall()
     out = []
     for d, n, lo, hi in rows:
         eng = dict(con.execute("""SELECT r.engine, AVG(r.hits) FROM results r JOIN draws w ON w.draw_id=r.target_draw
@@ -271,7 +274,9 @@ def build(con, cfg, archive_day=None):
             status = json.load(f)
     except Exception:
         pass
-    live = con.execute("SELECT COUNT(*), MAX(captured_at) FROM draws WHERE source!='import'").fetchone()
+    live = con.execute("SELECT COUNT(*), MAX(captured_at) FROM draws WHERE source IN ('page','api')").fetchone()
+    hist_n = con.execute("SELECT COUNT(*), (SELECT draw_date FROM draws WHERE source='history' ORDER BY draw_id LIMIT 1) "
+                         "FROM draws WHERE source='history'").fetchone()
     imported = con.execute("SELECT COUNT(*) FROM draws WHERE source='import'").fetchone()[0]
     rounds = con.execute("SELECT COUNT(DISTINCT target_draw) FROM results WHERE valid=1").fetchone()[0]
     try:
@@ -393,7 +398,7 @@ td.big{{color:#05100b;background:var(--green);font-weight:700}}
 .others{{display:grid;grid-template-columns:repeat(auto-fit,minmax(250px,1fr));gap:4px 16px;margin-top:10px;font-size:12.5px}}.others b{{display:inline-block;width:92px}}table.small td:last-child{{width:40%}}.note{{color:var(--muted);font-size:12.5px;max-width:880px}}
 </style></head><body><main>
 <h1>KENOAUTO · HOT SPOT</h1>
-<div class="muted">Cập nhật {kdb.now_str()} · {live[0]:,} kỳ log tự động (mới nhất {e(str(live[1]))}) · {imported:,} kỳ cũ nhập làm lịch sử · trạng thái: {e(str(status.get('state','?')))} ({e(str(status.get('mode','')))}{' · GitHub' if status.get('runner')=='github' else ''})<br>{e(kinds_txt)}</div>
+<div class="muted">Cập nhật {kdb.now_str()} · {live[0]:,} kỳ log tự động (mới nhất {e(str(live[1]))}) · {imported:,} kỳ cũ nhập · {hist_n[0]:,} kỳ lịch sử tải ngược{(' (từ ' + e(str(hist_n[1])) + ')') if hist_n[0] else ''} · trạng thái: {e(str(status.get('state','?')))} ({e(str(status.get('mode','')))}{' · GitHub' if status.get('runner')=='github' else ''})<br>{e(kinds_txt)}</div>
 {upcoming_html}
 <h2>Kết luận</h2><div class="head">{e(head)}</div>
 <h2>Máy quay có ngẫu nhiên không?</h2>{rnd_html}
