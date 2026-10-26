@@ -29,5 +29,19 @@
   "history_delay": 0.5,
   "learned_retrain_every": 500,
   "learned_window": 3000,
-  "learned_rounds": 5
+  "learned_rounds": 5,
+  "wallets": [
+    {
+      "engine": "GAP",
+      "spot": 10
+    },
+    {
+      "engine": "LEARNED",
+      "spot": 5
+    },
+    {
+      "engine": "RANDOM",
+      "spot": 10
+    }
+  ]
 }

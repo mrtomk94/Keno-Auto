@@ -279,6 +279,86 @@ def time_html(con, names):
               "khoảng 10 ô sẽ tô màu chỉ do may rủi. Một giờ 'tốt' thật phải giữ màu xanh qua nhiều tuần.</p>")
 
 
+WALLET_LEVELS = [300, 1000, 2000, 5000, 10000, 25000, 50000, 100000]
+
+
+def wallet_days(con, engine, spot, budget=100, cost=2):
+    """Virtual wallet: every day starts with $budget, plays this engine's locked ticket on every scored draw
+    ($1 Hot Spot + $1 Bulls-Eye). Stops when the money is gone, or when profit falls back to a locked level
+    (+300, +1000, +2000 …) after reaching it. Bulls-Eye prize replaces the base prize when the Bulls-Eye hits."""
+    rows = con.execute("""SELECT r.target_draw, d.draw_date, r.hits, r.bullseye_hit FROM results r
+                          JOIN draws d ON d.draw_id=r.target_draw
+                          WHERE r.valid=1 AND r.engine=? AND r.spot=? ORDER BY r.target_draw""", (engine, spot)).fetchall()
+    days = {}
+    for did, date, hits, be in rows:
+        ms = draw_epoch(date)
+        if not ms:
+            continue
+        day = dt.datetime.fromtimestamp(ms / 1000, _PT).date().isoformat()
+        days.setdefault(day, []).append((did, hits, be, date))
+    out = []
+    for day, draws in sorted(days.items()):
+        bal, floor, peak, n, why, big = float(budget), None, 0.0, 0, "hết kỳ trong ngày", None
+        for did, hits, be, date in draws:
+            if bal < cost:
+                why = "hết tiền"
+                break
+            bal -= cost
+            win = kdb.PAY_BULLSEYE[spot].get(hits, 0) if be else kdb.PAY_HOTSPOT[spot].get(hits, 0)
+            bal += win
+            n += 1
+            if not big or win > big[0]:
+                big = (win, did, hits, be, date)
+            p = bal - budget
+            peak = max(peak, p)
+            for L in WALLET_LEVELS:
+                if p >= L and (floor is None or L > floor):
+                    floor = L
+            if floor is not None and p <= floor:
+                why = f"chốt lời +${floor:,}"
+                break
+        else:
+            if bal < cost:
+                why = "hết tiền"
+        out.append(dict(day=day, result=bal - budget, draws=n, why=why, peak=peak, floor=floor, big=big,
+                        playing=(why == "hết kỳ trong ngày")))
+    return out
+
+
+def wallet_html(con, cfg):
+    wallets = cfg.get("wallets") or [{"engine": "GAP", "spot": 10}]
+    today = dt.datetime.now(_PT).date().isoformat() if _PT else dt.date.today().isoformat()
+    cards, tables = [], []
+    for w in wallets:
+        en, sp = w["engine"], w["spot"]
+        days = wallet_days(con, en, sp)
+        if not days:
+            continue
+        tot = sum(d["result"] for d in days)
+        wins = sum(d["result"] > 0 for d in days)
+        t = next((d for d in days if d["day"] == today), None)
+        now = (f"Hôm nay: <strong>{t['result']:+,.0f}$</strong> sau {t['draws']} kỳ · {'đang chơi' if t['playing'] else t['why']}"
+               if t else "Hôm nay: chưa có kỳ nào")
+        col = COLORS.get(en, "#fff")
+        cards.append(f"<div><span style='color:{col}'>{en} · vé {sp} số</span><b style='color:{'var(--green)' if tot > 0 else 'var(--red)'}'>"
+                     f"{tot:+,.0f}$</b><em>{len(days)} ngày · {wins} ngày lời · bỏ ra ${100 * len(days):,}<br>{now}</em></div>")
+        rows = ""
+        for d in reversed(days[-31:]):
+            b = d["big"]
+            bt = f"{b[2]}/{sp}{' +BE' if b[3] else ''} → ${b[0]:,.0f}" if b and b[0] > 0 else "—"
+            rows += (f"<tr><td>{d['day']}</td><td class='{'big' if d['result'] > 0 else ''}'>{d['result']:+,.0f}$</td>"
+                     f"<td>{d['draws']}</td><td>{d['peak']:+,.0f}$</td><td>{bt}</td><td class='muted'>{d['why']}</td></tr>")
+        tables.append(f"<h3 style='font-size:12px;color:{col};margin:16px 0 6px;letter-spacing:.08em'>{en} · VÉ {sp} SỐ</h3>"
+                      f"<div class='scroll'><table><tr><th>Ngày</th><th>Kết quả</th><th>Kỳ đã chơi</th><th>Lời cao nhất</th>"
+                      f"<th>Trúng lớn nhất</th><th>Lý do dừng</th></tr>{rows}</table></div>")
+    if not cards:
+        return ""
+    return ("<h2>Ví ảo · $100 mỗi ngày</h2><div class='kpis'>" + "".join(cards) + "</div>"
+            "<p class='note'>Mỗi ngày bắt đầu với $100. Mỗi kỳ đánh $2 ($1 Hot Spot + $1 Bulls-Eye) bằng vé đã khóa trước của engine. "
+            "Thắng thì đánh tiếp; khi lời chạm +$300, +$1.000, +$2.000 … thì giữ mức đó — rơi về mức đó là dừng. Hết tiền cũng dừng. "
+            "Tiền ảo — không phải lời khuyên chơi thật.</p>" + "".join(tables))
+
+
 UP_JS = r"""<script>
 (function(){
   var D; try { D = JSON.parse(document.getElementById('updata').textContent); } catch(e) { return; }
@@ -423,6 +503,7 @@ mỗi vé $1 trung bình chỉ trả lại khoảng 62¢.</p>
                 "<p class='note'>Ô xanh = trúng ≥ 6/10. Kỳ vọng ngẫu nhiên 2.5/10.</p>")
 
     tt_html = time_html(con, list(engines.ENGINES))
+    wallet = wallet_html(con, cfg)
     lm = kdb.meta_get(con, "learned_model")
     learned_html = ""
     if lm:
@@ -463,6 +544,7 @@ td.big{{color:#05100b;background:var(--green);font-weight:700}}
 <h1>KENOAUTO · HOT SPOT</h1>
 <div class="muted">Cập nhật {kdb.now_str()} · {live[0]:,} kỳ log tự động (mới nhất {e(str(live[1]))}) · {imported:,} kỳ cũ nhập · {hist_n[0]:,} kỳ lịch sử tải ngược{(' (từ ' + e(str(hist_n[1])) + ')') if hist_n[0] else ''} · trạng thái: {e(str(status.get('state','?')))} ({e(str(status.get('mode','')))}{' · GitHub' if status.get('runner')=='github' else ''})<br>{e(kinds_txt)}</div>
 {upcoming_html}
+{wallet}
 <h2>Kết luận</h2><div class="head">{e(head)}</div>
 <h2>Máy quay có ngẫu nhiên không?</h2>{rnd_html}
 <h2>z-score tích lũy · vé 10 số</h2>{zchart(con)}
