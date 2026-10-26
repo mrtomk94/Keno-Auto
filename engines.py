@@ -203,6 +203,14 @@ def e_pattern(X, ctx):
     return rank(f @ np.array(model["w"]) + model["b"])
 
 
+def e_learned(X, ctx):
+    model = ctx.get("learned_model")
+    if not model or X.shape[0] < 400:
+        return e_hot(X, ctx)
+    import learn
+    return learn.predict(X, model)
+
+
 ENGINES = {
     "RANDOM": e_random,
     "HOT": e_hot,
@@ -212,6 +220,7 @@ ENGINES = {
     "MARKOV": e_markov,
     "PATTERN": e_pattern,
     "DEVIATION": e_deviation,
+    "LEARNED": e_learned,
 }
 
 DESCRIPTIONS = {
@@ -223,6 +232,7 @@ DESCRIPTIONS = {
     "MARKOV": "Xác suất chuyển: số nào hay ra ngay sau các số của kỳ trước.",
     "PATTERN": "AI học: hồi quy logistic trên 10 tín hiệu, tự train lại định kỳ.",
     "DEVIATION": "Z-score lệch chuẩn ở 3 khung 30/90/toàn bộ, phạt các số hay đi cùng nhau.",
+    "LEARNED": "Tự học: vòng lặp thử hàng nghìn cách kết hợp 14 tín hiệu trên dữ liệu thật, học lại mỗi 500 kỳ.",
 }
 
 

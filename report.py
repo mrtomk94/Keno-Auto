@@ -12,7 +12,7 @@ import kdb
 HERE = os.path.dirname(os.path.abspath(__file__))
 OUT = os.path.join(HERE, "reports")
 COLORS = {"RANDOM": "#8b98a3", "HOT": "#ff6b5b", "GAP": "#f5a524", "CLUSTER": "#3ddc97",
-          "BLOCK": "#2196c9", "MARKOV": "#a78bfa", "PATTERN": "#f472b6", "DEVIATION": "#e5e7eb"}
+          "BLOCK": "#2196c9", "MARKOV": "#a78bfa", "PATTERN": "#f472b6", "DEVIATION": "#e5e7eb", "LEARNED": "#facc15"}
 
 
 def hyper(k, h):
@@ -107,7 +107,7 @@ def randomness(con):
     ov_sd = math.sqrt(20 * 0.25 * 0.75 * 60 / 79)
     ov_z = (ov - 5) / (ov_sd / math.sqrt(len(overlaps))) if overlaps else None
     hot = sorted(range(80), key=lambda i: -f[i])[:5]
-    return dict(draws=T, chi=chi, chi_p=chi2_p(chi, 79), be_n=len(be), be_chi=be_chi, be_p=be_p,
+    return dict(draws=T, chi=chi, chi_p=chi2_p(chi / 0.75, 79), be_n=len(be), be_chi=be_chi, be_p=be_p,
                 overlap=ov, overlap_n=len(overlaps), overlap_z=ov_z,
                 top=[(i + 1, int(f[i]), round(float(f[i]) / T * 100, 1)) for i in hot])
 
@@ -226,6 +226,57 @@ def prediction_log(con, limit=40):
         out.append(dict(draw=did, date=date, numbers=json.loads(nums), bullseye=be, hits=hits,
                         kind=kind[0] if kind else "", best=best))
     return out
+
+
+def time_tables(con):
+    """Average 10-spot hits per engine by hour of day and by weekday (scored tickets only)."""
+    rows = con.execute("""SELECT d.draw_date, r.engine, r.hits FROM results r JOIN draws d ON d.draw_id=r.target_draw
+                          WHERE r.valid=1 AND r.spot=10""").fetchall()
+    by_h, by_d, cache = {}, {}, {}
+    for date, en, h in rows:
+        if date not in cache:
+            ms = draw_epoch(date)
+            cache[date] = dt.datetime.fromtimestamp(ms / 1000, _PT) if ms else None
+        t = cache[date]
+        if not t:
+            continue
+        for key, bucket in ((t.hour, by_h), (t.weekday(), by_d)):
+            a = bucket.setdefault(key, {}).setdefault(en, [0, 0])
+            a[0] += h
+            a[1] += 1
+    return by_h, by_d
+
+
+def time_html(con, names):
+    by_h, by_d = time_tables(con)
+    if not by_h:
+        return ""
+    sd = math.sqrt(10 * 0.25 * 0.75 * 70 / 79)
+
+    def cell(a):
+        if not a:
+            return "<td class='muted'>—</td>"
+        m = a[0] / a[1]
+        z = (m - 2.5) / (sd / math.sqrt(a[1]))
+        cls = "" if a[1] < 50 else (" class='big'" if z >= 2 else (" class='warnt'" if z <= -2 else ""))
+        return f"<td{cls}>{m:.2f}</td>"
+
+    def table(bucket, label, keys, fmt):
+        head = "".join(f"<th>{n}</th>" for n in names)
+        body = ""
+        for k in keys:
+            if k not in bucket:
+                continue
+            n = max(a[1] for a in bucket[k].values())
+            body += f"<tr><td>{fmt(k)}</td><td>{n}</td>" + "".join(cell(bucket[k].get(e)) for e in names) + "</tr>"
+        return f"<div class='scroll'><table><tr><th>{label}</th><th>Kỳ</th>{head}</tr>{body}</table></div>"
+
+    days = ["Thứ 2", "Thứ 3", "Thứ 4", "Thứ 5", "Thứ 6", "Thứ 7", "CN"]
+    return ("<h2>Theo giờ trong ngày · TB trúng vé 10 số (kỳ vọng 2.50)</h2>"
+            + table(by_h, "Giờ", range(24), lambda h: f"{h:02d}:00")
+            + "<h2>Theo thứ trong tuần</h2>" + table(by_d, "Ngày", range(7), lambda d: days[d])
+            + "<p class='note'>Ô xanh = cao hơn may rủi (z ≥ 2), ô vàng = thấp hơn (z ≤ −2), chỉ tô khi có ≥ 50 kỳ. Với hơn 200 ô, "
+              "khoảng 10 ô sẽ tô màu chỉ do may rủi. Một giờ 'tốt' thật phải giữ màu xanh qua nhiều tuần.</p>")
 
 
 UP_JS = r"""<script>
@@ -371,6 +422,18 @@ mỗi vé $1 trung bình chỉ trả lại khoảng 62¢.</p>
                 f"<th>Thắng lớn nhất / $1</th></tr>{''.join(log_rows)}</table></div>"
                 "<p class='note'>Ô xanh = trúng ≥ 6/10. Kỳ vọng ngẫu nhiên 2.5/10.</p>")
 
+    tt_html = time_html(con, list(engines.ENGINES))
+    lm = kdb.meta_get(con, "learned_model")
+    learned_html = ""
+    if lm:
+        import learn
+        lrows = "".join(f"<tr><td>{e(f)}</td><td>{w:+.3f}</td><td><div class='bar' style='width:{min(abs(w)*120,100):.0f}%;background:{'#3ddc97' if w>0 else '#ff6b5b'}'></div></td></tr>"
+                        for f, w in sorted(zip(learn.SIGNALS, lm["w"]), key=lambda x: -abs(x[1])))
+        learned_html = (f"<h2>LEARNED · công thức tự học</h2><p class='muted'>Học lại lúc {e(lm.get('trained_at',''))} trên "
+                        f"{lm['trained_on']:,} kỳ thật. Điểm trên dữ liệu đã học: {lm['train_score']:.3f} — con số này luôn đẹp vì "
+                        "vòng lặp chọn đúng cái khớp quá khứ nhất; chỉ bảng điểm live phía trên mới cho biết nó có thật sự đoán được không.</p>"
+                        f"<table class='small'><tr><th>Tín hiệu</th><th>Trọng số</th><th></th></tr>{lrows}</table>")
+
     theo = " · ".join(f"{k} số: {theo_return(k)*100:.1f}%" for k in cfg.get("spots", [5, 6, 7, 8, 9, 10]))
     page = f"""<!doctype html><html lang="vi"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
 <title>KenoAuto Report</title><meta http-equiv="refresh" content="180">
@@ -410,6 +473,8 @@ td.big{{color:#05100b;background:var(--green);font-weight:700}}
 <h2>Theo ngày · TB trúng vé 10 số (kỳ vọng 2.50)</h2>
 <div class="scroll"><table><tr><th>Ngày</th><th>Kỳ log</th><th>Bỏ lỡ</th><th>Kỳ chấm</th>{''.join(f'<th>{n}</th>' for n in names)}</tr>{''.join(day_rows)}</table></div>
 {log_html}
+{tt_html}
+{learned_html}
 <h2>PATTERN · AI học được gì</h2>{model_html}
 {UP_JS}
 </main></body></html>"""

@@ -25,7 +25,29 @@ def load_ctx(con, cfg, basis):
     model = kdb.meta_get(con, "pattern_model")
     if model and model.get("upto", 0) > basis:
         model = None  # trained on draws after the basis -> not allowed
-    return {"hot_window": cfg.get("hot_window", 30), "pattern_model": model}
+    lm = kdb.meta_get(con, "learned_model")
+    if lm and lm.get("upto", 0) > basis:
+        lm = None
+    return {"hot_window": cfg.get("hot_window", 30), "pattern_model": model, "learned_model": lm}
+
+
+def maybe_relearn(con, cfg, upto, force=False):
+    """Re-run the LEARNED search loop every N draws, on real draws <= upto only."""
+    import learn
+    every = cfg.get("learned_retrain_every", 500)
+    m = kdb.meta_get(con, "learned_model")
+    real = con.execute("SELECT COUNT(*) FROM draws WHERE source!='import' AND draw_id<=?", (upto,)).fetchone()[0]
+    if real < 1000 or (not force and m and m.get("upto", 0) <= upto and real - m.get("at_count", 0) < every):
+        return m
+    rows = con.execute("SELECT draw_id, numbers FROM draws WHERE source!='import' AND draw_id<=? "
+                       "ORDER BY draw_id DESC LIMIT ?", (upto, cfg.get("learned_window", 3000))).fetchall()
+    rows.reverse()
+    X = engines.to_matrix([(r[0], set(json.loads(r[1])), None) for r in rows])
+    m = learn.train(X, rounds=cfg.get("learned_rounds", 5), pop=150, seed=upto % 100000)
+    m.update(upto=upto, at_count=real, trained_at=kdb.now_str())
+    kdb.meta_set(con, "learned_model", m)
+    log.info("LEARNED re-searched on %d draws: train score %.4f", m["trained_on"], m["train_score"])
+    return m
 
 
 def maybe_retrain(con, cfg, upto, force=False):
@@ -122,4 +144,5 @@ def on_new_draws(con, cfg, new_ids, prev_max=None):
     latest = kdb.latest_draw_id(con)
     if latest:
         maybe_retrain(con, cfg, upto=latest)
+        maybe_relearn(con, cfg, upto=latest)
         lock_ahead(con, cfg, latest)
