@@ -32,16 +32,24 @@
   "learned_rounds": 5,
   "wallets": [
     {
-      "engine": "GAP",
-      "spot": 10
+      "name": "Vòng lặp tự chọn (7 ngày)",
+      "adaptive": true,
+      "lookback": 7
     },
     {
-      "engine": "LEARNED",
-      "spot": 5
-    },
-    {
+      "name": "Mất ít nhất · 5 số · 25 kỳ",
       "engine": "RANDOM",
-      "spot": 10
+      "spot": 5,
+      "be": false,
+      "max_draws": 25,
+      "levels": false
+    },
+    {
+      "name": "GAP 10 số + Bulls-Eye",
+      "engine": "GAP",
+      "spot": 10,
+      "be": true,
+      "levels": true
     }
   ]
 }

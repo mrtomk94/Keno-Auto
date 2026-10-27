@@ -5,6 +5,7 @@ import json
 import math
 import os
 import shutil
+from html import escape as e_
 
 import engines
 import kdb
@@ -282,56 +283,117 @@ def time_html(con, names):
 WALLET_LEVELS = [300, 1000, 2000, 5000, 10000, 25000, 50000, 100000]
 
 
-def wallet_days(con, engine, spot, budget=100, cost=2):
-    """Virtual wallet: every day starts with $budget, plays this engine's locked ticket on every scored draw
-    ($1 Hot Spot + $1 Bulls-Eye). Stops when the money is gone, or when profit falls back to a locked level
-    (+300, +1000, +2000 …) after reaching it. Bulls-Eye prize replaces the base prize when the Bulls-Eye hits."""
-    rows = con.execute("""SELECT r.target_draw, d.draw_date, r.hits, r.bullseye_hit FROM results r
-                          JOIN draws d ON d.draw_id=r.target_draw
-                          WHERE r.valid=1 AND r.engine=? AND r.spot=? ORDER BY r.target_draw""", (engine, spot)).fetchall()
-    days = {}
-    for did, date, hits, be in rows:
-        ms = draw_epoch(date)
-        if not ms:
-            continue
-        day = dt.datetime.fromtimestamp(ms / 1000, _PT).date().isoformat()
-        days.setdefault(day, []).append((did, hits, be, date))
-    out = []
-    for day, draws in sorted(days.items()):
-        bal, floor, peak, n, why, big = float(budget), None, 0.0, 0, "hết kỳ trong ngày", None
-        for did, hits, be, date in draws:
-            if bal < cost:
-                why = "hết tiền"
-                break
-            bal -= cost
-            win = kdb.PAY_BULLSEYE[spot].get(hits, 0) if be else kdb.PAY_HOTSPOT[spot].get(hits, 0)
-            bal += win
-            n += 1
-            if not big or win > big[0]:
-                big = (win, did, hits, be, date)
-            p = bal - budget
-            peak = max(peak, p)
+_WROWS = {}
+
+
+def _wallet_rows(con, engine, spot):
+    """Scored draws of one engine/spot grouped by Pacific day (cached per report build)."""
+    key = (engine, spot)
+    if key not in _WROWS:
+        rows = con.execute("""SELECT r.target_draw, d.draw_date, r.hits, r.bullseye_hit FROM results r
+                              JOIN draws d ON d.draw_id=r.target_draw
+                              WHERE r.valid=1 AND r.engine=? AND r.spot=? ORDER BY r.target_draw""", (engine, spot)).fetchall()
+        days = {}
+        for did, date, hits, be in rows:
+            ms = draw_epoch(date)
+            if ms:
+                day = dt.datetime.fromtimestamp(ms / 1000, _PT).date().isoformat()
+                days.setdefault(day, []).append((did, hits, be, date))
+        _WROWS[key] = days
+    return _WROWS[key]
+
+
+def play_session(draws, spot, be_on=True, max_draws=999, take_profit=None, levels=False, budget=100):
+    """One day with $budget. Each draw costs $1 (+$1 Bulls-Eye if be_on). Stops at max_draws, when broke,
+    at take_profit, or (levels=True) when profit falls back to a locked level (+300, +1000 …)."""
+    cost = 2 if be_on else 1
+    bal, floor, peak, n, why, big = float(budget), None, 0.0, 0, "hết kỳ trong ngày", None
+    for did, hits, be, date in draws:
+        if n >= max_draws:
+            why = f"đủ {max_draws} kỳ"
+            break
+        if bal < cost:
+            why = "hết tiền"
+            break
+        bal -= cost
+        win = kdb.PAY_BULLSEYE[spot].get(hits, 0) if (be_on and be) else kdb.PAY_HOTSPOT[spot].get(hits, 0)
+        bal += win
+        n += 1
+        if not big or win > big[0]:
+            big = (win, did, hits, be and be_on, date)
+        p = bal - budget
+        peak = max(peak, p)
+        if take_profit and p >= take_profit:
+            why = f"chốt lời +${take_profit}"
+            break
+        if levels:
             for L in WALLET_LEVELS:
                 if p >= L and (floor is None or L > floor):
                     floor = L
             if floor is not None and p <= floor:
                 why = f"chốt lời +${floor:,}"
                 break
-        else:
-            if bal < cost:
-                why = "hết tiền"
-        out.append(dict(day=day, result=bal - budget, draws=n, why=why, peak=peak, floor=floor, big=big,
-                        playing=(why == "hết kỳ trong ngày")))
+    else:
+        if n >= max_draws:
+            why = f"đủ {max_draws} kỳ"
+        elif bal < cost:
+            why = "hết tiền"
+    return dict(result=bal - budget, draws=n, why=why, peak=peak, big=big, playing=(why == "hết kỳ trong ngày"))
+
+
+def wallet_days(con, engine, spot, be=True, max_draws=999, take_profit=None, levels=True, label=None):
+    out = []
+    for day, draws in sorted(_wallet_rows(con, engine, spot).items()):
+        r = play_session(draws, spot, be, max_draws, take_profit, levels)
+        r.update(day=day, plan=label)
+        out.append(r)
+    return out
+
+
+def plan_name(p):
+    return (f"{p['engine']} {p['spot']} số{' +BE' if p['be'] else ''} · "
+            f"{'tới hết tiền' if p['max_draws'] >= 999 else str(p['max_draws']) + ' kỳ'}"
+            f"{' · chốt +' + str(p['take_profit']) if p['take_profit'] else ''}")
+
+
+def adaptive_days(con, lookback=7):
+    """The self-improving wallet: each day it plays the plan that made the most money over the previous
+    `lookback` days (it never sees the day it is playing), then the day's real result is added to its memory."""
+    plans = [dict(engine=e, spot=s, be=b, max_draws=m, take_profit=t, levels=False)
+             for e in engines.ENGINES for s in (5, 8, 10) for b in (False, True)
+             for m in (25, 50, 100, 999) for t in (None, 50, 100)]
+    table = {}
+    for i, p in enumerate(plans):
+        for r in wallet_days(con, p["engine"], p["spot"], p["be"], p["max_draws"], p["take_profit"], False):
+            table.setdefault(r["day"], {})[i] = r
+    out = []
+    days = sorted(table)
+    for j, day in enumerate(days):
+        past = days[max(0, j - lookback):j]
+        if len(past) < 3:
+            continue
+        score = {i: sum(table[d][i]["result"] for d in past if i in table[d]) for i in table[day]}
+        best = max(score, key=score.get)
+        r = dict(table[day][best])
+        r.update(day=day, plan=plan_name(plans[best]))
+        out.append(r)
     return out
 
 
 def wallet_html(con, cfg):
+    _WROWS.clear()
     wallets = cfg.get("wallets") or [{"engine": "GAP", "spot": 10}]
     today = dt.datetime.now(_PT).date().isoformat() if _PT else dt.date.today().isoformat()
     cards, tables = [], []
     for w in wallets:
-        en, sp = w["engine"], w["spot"]
-        days = wallet_days(con, en, sp)
+        if w.get("adaptive"):
+            days = adaptive_days(con, w.get("lookback", 7))
+            title, col = w.get("name", "Vòng lặp tự chọn"), "#facc15"
+        else:
+            p = dict(engine=w["engine"], spot=w["spot"], be=w.get("be", True), max_draws=w.get("max_draws", 999),
+                     take_profit=w.get("take_profit"), levels=w.get("levels", True))
+            days = wallet_days(con, p["engine"], p["spot"], p["be"], p["max_draws"], p["take_profit"], p["levels"])
+            title, col = w.get("name") or plan_name(p), COLORS.get(w["engine"], "#fff")
         if not days:
             continue
         tot = sum(d["result"] for d in days)
@@ -339,24 +401,26 @@ def wallet_html(con, cfg):
         t = next((d for d in days if d["day"] == today), None)
         now = (f"Hôm nay: <strong>{t['result']:+,.0f}$</strong> sau {t['draws']} kỳ · {'đang chơi' if t['playing'] else t['why']}"
                if t else "Hôm nay: chưa có kỳ nào")
-        col = COLORS.get(en, "#fff")
-        cards.append(f"<div><span style='color:{col}'>{en} · vé {sp} số</span><b style='color:{'var(--green)' if tot > 0 else 'var(--red)'}'>"
+        cards.append(f"<div><span style='color:{col}'>{e_(title)}</span><b style='color:{'var(--green)' if tot > 0 else 'var(--red)'}'>"
                      f"{tot:+,.0f}$</b><em>{len(days)} ngày · {wins} ngày lời · bỏ ra ${100 * len(days):,}<br>{now}</em></div>")
         rows = ""
         for d in reversed(days[-31:]):
             b = d["big"]
-            bt = f"{b[2]}/{sp}{' +BE' if b[3] else ''} → ${b[0]:,.0f}" if b and b[0] > 0 else "—"
+            bt = f"{b[2]} trúng{' +BE' if b[3] else ''} → ${b[0]:,.0f}" if b and b[0] > 0 else "—"
+            plan = f"<td class='muted'>{e_(d['plan'])}</td>" if w.get("adaptive") else ""
             rows += (f"<tr><td>{d['day']}</td><td class='{'big' if d['result'] > 0 else ''}'>{d['result']:+,.0f}$</td>"
-                     f"<td>{d['draws']}</td><td>{d['peak']:+,.0f}$</td><td>{bt}</td><td class='muted'>{d['why']}</td></tr>")
-        tables.append(f"<h3 style='font-size:12px;color:{col};margin:16px 0 6px;letter-spacing:.08em'>{en} · VÉ {sp} SỐ</h3>"
+                     f"<td>{d['draws']}</td><td>{d['peak']:+,.0f}$</td><td>{bt}</td><td class='muted'>{d['why']}</td>{plan}</tr>")
+        ph = "<th>Cách chơi đã chọn</th>" if w.get("adaptive") else ""
+        tables.append(f"<h3 style='font-size:12px;color:{col};margin:16px 0 6px;letter-spacing:.08em'>{e_(title).upper()}</h3>"
                       f"<div class='scroll'><table><tr><th>Ngày</th><th>Kết quả</th><th>Kỳ đã chơi</th><th>Lời cao nhất</th>"
-                      f"<th>Trúng lớn nhất</th><th>Lý do dừng</th></tr>{rows}</table></div>")
+                      f"<th>Trúng lớn nhất</th><th>Lý do dừng</th>{ph}</tr>{rows}</table></div>")
     if not cards:
         return ""
     return ("<h2>Ví ảo · $100 mỗi ngày</h2><div class='kpis'>" + "".join(cards) + "</div>"
-            "<p class='note'>Mỗi ngày bắt đầu với $100. Mỗi kỳ đánh $2 ($1 Hot Spot + $1 Bulls-Eye) bằng vé đã khóa trước của engine. "
-            "Thắng thì đánh tiếp; khi lời chạm +$300, +$1.000, +$2.000 … thì giữ mức đó — rơi về mức đó là dừng. Hết tiền cũng dừng. "
-            "Tiền ảo — không phải lời khuyên chơi thật.</p>" + "".join(tables))
+            "<p class='note'>Mỗi ví bắt đầu ngày với $100 và chơi bằng vé đã khóa trước kỳ quay. "
+            "<b>Vòng lặp tự chọn</b>: mỗi ngày chọn trong 648 cách chơi cách đã lời nhiều nhất 7 ngày trước đó, chơi mù, rồi học thêm kết quả. "
+            "<b>Mất ít nhất</b>: 5 số, không Bulls-Eye, 25 kỳ — cách vòng lặp tìm ra là lỗ ít nhất. "
+            "Tiền ảo — Hot Spot trả lại khoảng 64¢ cho mỗi $1, không cách chơi nào đổi được con số đó.</p>" + "".join(tables))
 
 
 UP_JS = r"""<script>
