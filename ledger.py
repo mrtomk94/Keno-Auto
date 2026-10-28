@@ -146,3 +146,8 @@ def on_new_draws(con, cfg, new_ids, prev_max=None):
         maybe_retrain(con, cfg, upto=latest)
         maybe_relearn(con, cfg, upto=latest)
         lock_ahead(con, cfg, latest)
+    try:
+        import lab
+        lab.on_new_draws(con, cfg, new_ids, prev_max)
+    except Exception as ex:
+        log.warning("lab failed: %s", ex)

@@ -13,7 +13,8 @@ import kdb
 HERE = os.path.dirname(os.path.abspath(__file__))
 OUT = os.path.join(HERE, "reports")
 COLORS = {"RANDOM": "#8b98a3", "HOT": "#ff6b5b", "GAP": "#f5a524", "CLUSTER": "#3ddc97",
-          "BLOCK": "#2196c9", "MARKOV": "#a78bfa", "PATTERN": "#f472b6", "DEVIATION": "#e5e7eb", "LEARNED": "#facc15"}
+          "BLOCK": "#2196c9", "MARKOV": "#a78bfa", "PATTERN": "#f472b6", "DEVIATION": "#e5e7eb", "LEARNED": "#facc15",
+          "Z-HOT": "#fb923c", "Z-COLD": "#38bdf8", "Z-LAST": "#c084fc", "Z-BLOCK": "#4ade80", "Z-MID": "#f9a8d4"}
 
 
 def hyper(k, h):
@@ -423,6 +424,102 @@ def wallet_html(con, cfg):
             "Tiền ảo — Hot Spot trả lại khoảng 64¢ cho mỗi $1, không cách chơi nào đổi được con số đó.</p>" + "".join(tables))
 
 
+def prereg_html(con, cfg):
+    """Pre-registered test, criteria fixed BEFORE the data was seen (28/10/2026)."""
+    pr = cfg.get("prereg")
+    if not pr:
+        return ""
+    e1, e0, sp, k, start = pr["engine"], pr["baseline"], pr["spot"], pr["min_hits"], pr["start_draw"]
+    rows = con.execute("""SELECT a.target_draw, a.hits, b.hits FROM results a JOIN results b
+                          ON a.target_draw=b.target_draw AND b.engine=? AND b.spot=a.spot AND b.valid=1
+                          JOIN predictions p ON p.target_draw=a.target_draw AND p.engine=a.engine
+                          WHERE a.engine=? AND a.spot=? AND a.valid=1 AND a.target_draw>=? AND p.kind='live'
+                          ORDER BY a.target_draw""", (e0, e1, sp, start)).fetchall()
+    n = len(rows)
+    p0 = sum(math.comb(sp, h) * math.comb(80 - sp, 20 - h) for h in range(k, sp + 1)) / math.comb(80, 20)
+    hit1 = sum(r[1] >= k for r in rows)
+    hit0 = sum(r[2] >= k for r in rows)
+    b = sum(r[1] >= k and r[2] < k for r in rows)
+    c = sum(r[1] < k and r[2] >= k for r in rows)
+    rate = hit1 / n if n else 0
+    z = (rate - p0) / math.sqrt(p0 * (1 - p0) / n) if n else 0
+    p_one = p_upper(z) if n else 1
+    zm = (b - c) / math.sqrt(b + c) if b + c else 0
+    pm = p_upper(zm) if b + c else 1
+    done = n >= pr["n_target"]
+    pass1, pass2 = rate >= pr["threshold_rate"], pm < pr["alpha"]
+    if not done:
+        verdict = (f"Đang thu thập: {n:,}/{pr['n_target']:,} kỳ. Số tạm thời bên dưới <b>chưa dùng để kết luận</b> — "
+                   "kết luận chỉ được đọc khi đủ mẫu, theo đúng tiêu chí đã ghi trước.")
+        cls = "muted"
+    elif pass1 and pass2:
+        verdict, cls = f"ĐẠT cả 2 tiêu chí sau {n:,} kỳ — {e1} có lợi thế đã được kiểm định trước. Cần thêm 1 vòng xác nhận độc lập.", "good"
+    else:
+        verdict, cls = (f"KHÔNG ĐẠT sau {n:,} kỳ — {e1} không có lợi thế (tiêu chí 1: {'đạt' if pass1 else 'không'}, "
+                        f"tiêu chí 2: {'đạt' if pass2 else 'không'})."), "flat"
+    bar = min(100, n / pr["n_target"] * 100)
+    prereg2 = ""
+    p2 = cfg.get("prereg2")
+    if p2:
+        r2 = con.execute("""SELECT a.hits FROM results a JOIN predictions p ON p.target_draw=a.target_draw AND p.engine=a.engine
+                            WHERE a.engine=? AND a.spot=10 AND a.valid=1 AND a.target_draw>=? AND p.kind='live'""",
+                         (p2["engine"], p2["start_draw"])).fetchall()
+        n2 = len(r2)
+        m2 = sum(x[0] for x in r2) / n2 if n2 else 0
+        z2 = (m2 - 2.5) / (math.sqrt(10 * .25 * .75 * 70 / 79) / math.sqrt(n2)) if n2 else 0
+        st = ("đang thu thập — chưa kết luận" if n2 < p2["n_target"] else
+              ("ĐẠT" if z2 >= p2["z_threshold"] else "KHÔNG ĐẠT"))
+        prereg2 = (f"<div class='head' style='margin-top:10px'><b>Giả thuyết 2 (ghi {p2['registered']}):</b> {p2['engine']} trúng trung bình "
+                   f"&gt; 2,500 số/vé 10 số. Mẫu {p2['n_target']:,} kỳ live từ #{p2['start_draw']}; đạt nếu z ≥ {p2['z_threshold']}.<br>"
+                   f"Hiện: <b>{m2:.3f}</b> trên {n2:,} kỳ (z {z2:+.2f}) · {st}</div>")
+    return f"""<h2>Kiểm định đăng ký trước · {e1} trúng ≥{k}/{sp}</h2>
+<div class="head"><b>Giả thuyết:</b> {e1} (đã khóa, không chỉnh) trúng ≥{k}/{sp} nhiều hơn may rủi ({p0 * 100:.2f}%) và nhiều hơn {e0} trên cùng các kỳ.<br>
+<b>Mẫu:</b> {pr['n_target']:,} kỳ live từ kỳ #{start} · <b>Đạt nếu:</b> (1) tỉ lệ ≥ {pr['threshold_rate'] * 100:.2f}% <b>và</b>
+(2) so cặp từng kỳ với {e0} p &lt; {pr['alpha']} (McNemar, một phía) · ghi ngày {pr['registered']}.</div>
+<div style="background:var(--line);border-radius:4px;height:10px;margin:10px 0"><div style="width:{bar:.1f}%;height:10px;border-radius:4px;background:var(--green)"></div></div>
+<div class="kpis">
+<div><span>{e1} ≥{k}/{sp}</span><b>{hit1}/{n} = {rate * 100:.2f}%</b><em>z {z:+.2f} · p một phía {fmt_p(p_one)} · ngưỡng {pr['threshold_rate'] * 100:.2f}%</em></div>
+<div><span>{e0} ≥{k}/{sp} (cùng kỳ)</span><b>{hit0}/{n} = {(hit0 / n * 100 if n else 0):.2f}%</b><em>kỳ vọng {p0 * 100:.2f}%</em></div>
+<div><span>So cặp từng kỳ</span><b>{b} : {c}</b><em>{e1} đạt mà {e0} không : ngược lại · p {fmt_p(pm)}</em></div>
+</div><p class="note {cls}" style="font-size:13.5px">{verdict}</p>{prereg2}"""
+
+
+def lab_html(con, cfg):
+    """Engine lab: 10 versions per family, scored like everything else."""
+    if not cfg.get("lab", True):
+        return ""
+    import lab
+    tab = lab.table(con)
+    if not tab:
+        return "<h2>Phòng thí nghiệm · 10 phiên bản mỗi engine</h2><p class='muted'>Đang chờ kỳ đầu tiên được chấm.</p>"
+    allz = [r[4] for rows in tab.values() for r in rows]
+    n_big = sum(abs(z) >= 2 for z in allz)
+    head = "".join(f"<th>v{v}</th>" for v in range(1, 11))
+    body = ""
+    for fam, rows in tab.items():
+        best = max(rows, key=lambda r: r[3])
+        cells = ""
+        for v, prm, n, a, z, r5 in rows:
+            cls = " class='big'" if (n >= 200 and z >= 2) else (" class='warnt'" if (n >= 200 and z <= -2) else "")
+            star = " ★" if (v, prm) == (best[0], best[1]) else ""
+            cells += f"<td{cls} title='{e_(str(prm))} · n={n} · z={z:+.2f}'>{a:.3f}{star}</td>"
+        pv = lab.paired_vs_v1(con, fam, best[0]) if best[0] != 1 else None
+        cmp_txt = ("v1 là tốt nhất" if best[0] == 1 else
+                   f"v{best[0]} − v1 = {pv[0]:+.3f} (z {pv[1]:+.2f})" if pv else "chưa đủ 30 kỳ để so")
+        body += (f"<tr><td><b style='color:{COLORS.get(fam, '#ccc')}'>{fam}</b><br><span class='muted'>{e_(lab.FAMILIES[fam][0])}</span></td>"
+                 f"{cells}<td>{cmp_txt}</td></tr>")
+    rnd = tab.get("RANDOM", [])
+    spread = (f"{min(r[3] for r in rnd):.3f} – {max(r[3] for r in rnd):.3f}" if rnd else "—")
+    params = "".join(f"<tr><td>{fam}</td>" + "".join(f"<td>{e_(str(p))}</td>" for p in lab.FAMILIES[fam][1]) + "</tr>"
+                     for fam in tab)
+    return (f"<h2>Phòng thí nghiệm · 10 phiên bản mỗi engine (vé 10 số, kỳ vọng 2.500)</h2>"
+            f"<div class='scroll'><table><tr><th>Họ engine</th>{head}<th>Bản tốt nhất so với v1 (cùng kỳ)</th></tr>{body}</table></div>"
+            f"<p class='note'>★ = bản cao nhất của họ. Ô xanh/vàng = z ≥ 2 / ≤ −2 (khi ≥ 200 kỳ). Hiện có <b>{n_big}/{len(allz)}</b> ô như vậy — "
+            f"may rủi tự tạo ra khoảng {len(allz) * 0.0455:.1f}. <b>Thước đo may rủi:</b> 10 vé RANDOM độc lập đang chênh nhau từ {spread}; "
+            f"một bản engine chỉ đáng chú ý nếu vượt xa khoảng đó và giữ được qua thời gian.</p>"
+            f"<details><summary class='muted'>Thông số từng phiên bản</summary><div class='scroll'><table><tr><th>Họ</th>{head}</tr>{params}</table></div></details>")
+
+
 UP_JS = r"""<script>
 (function(){
   var D; try { D = JSON.parse(document.getElementById('updata').textContent); } catch(e) { return; }
@@ -608,6 +705,7 @@ td.big{{color:#05100b;background:var(--green);font-weight:700}}
 <h1>KENOAUTO · HOT SPOT</h1>
 <div class="muted">Cập nhật {kdb.now_str()} · {live[0]:,} kỳ log tự động (mới nhất {e(str(live[1]))}) · {imported:,} kỳ cũ nhập · {hist_n[0]:,} kỳ lịch sử tải ngược{(' (từ ' + e(str(hist_n[1])) + ')') if hist_n[0] else ''} · trạng thái: {e(str(status.get('state','?')))} ({e(str(status.get('mode','')))}{' · GitHub' if status.get('runner')=='github' else ''})<br>{e(kinds_txt)}</div>
 {upcoming_html}
+{prereg_html(con, cfg)}
 {wallet}
 <h2>Kết luận</h2><div class="head">{e(head)}</div>
 <h2>Máy quay có ngẫu nhiên không?</h2>{rnd_html}
@@ -619,6 +717,7 @@ td.big{{color:#05100b;background:var(--green);font-weight:700}}
 <h2>Theo ngày · TB trúng vé 10 số (kỳ vọng 2.50)</h2>
 <div class="scroll"><table><tr><th>Ngày</th><th>Kỳ log</th><th>Bỏ lỡ</th><th>Kỳ chấm</th>{''.join(f'<th>{n}</th>' for n in names)}</tr>{''.join(day_rows)}</table></div>
 {log_html}
+{lab_html(con, cfg)}
 {tt_html}
 {learned_html}
 <h2>PATTERN · AI học được gì</h2>{model_html}

@@ -51,5 +51,24 @@
       "be": true,
       "levels": true
     }
-  ]
+  ],
+  "prereg": {
+    "engine": "CLUSTER",
+    "baseline": "RANDOM",
+    "spot": 10,
+    "min_hits": 5,
+    "start_draw": 3314425,
+    "n_target": 3000,
+    "threshold_rate": 0.0721,
+    "alpha": 0.05,
+    "registered": "28/10/2026 00:22 PT"
+  },
+  "lab": true,
+  "prereg2": {
+    "engine": "CLUSTER",
+    "start_draw": 3314425,
+    "n_target": 8400,
+    "z_threshold": 1.645,
+    "registered": "28/10/2026 00:40 PT"
+  }
 }
