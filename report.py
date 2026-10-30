@@ -520,6 +520,88 @@ def lab_html(con, cfg):
             f"<details><summary class='muted'>Thông số từng phiên bản</summary><div class='scroll'><table><tr><th>Họ</th>{head}</tr>{params}</table></div></details>")
 
 
+TAB_CSS = r"""
+html{-webkit-text-size-adjust:100%}
+.top{position:sticky;top:0;z-index:20;background:rgba(7,9,11,.96);backdrop-filter:blur(6px);border-bottom:1px solid var(--line);padding:10px 16px 0;padding-top:max(10px,env(safe-area-inset-top))}
+.top>*{max-width:1180px;margin-left:auto;margin-right:auto}
+.brand{display:flex;align-items:center;gap:10px;justify-content:space-between}.brand h1{margin:0}
+.dev{font-size:11px;color:var(--muted);border:1px solid var(--line);border-radius:10px;padding:1px 8px;white-space:nowrap}
+.meta{margin:4px auto 6px;font-size:12px}.meta summary{cursor:pointer;color:var(--muted);list-style:none}.meta summary::before{content:"▸ "}.meta[open] summary::before{content:"▾ "}
+.tabs{display:flex;gap:4px;overflow-x:auto;scrollbar-width:none;-webkit-overflow-scrolling:touch}.tabs::-webkit-scrollbar{display:none}
+.tabs button{flex:0 0 auto;background:none;border:0;border-bottom:2px solid transparent;color:var(--muted);font:inherit;font-size:13px;padding:8px 12px;cursor:pointer;white-space:nowrap}
+.tabs button.on{color:var(--green);border-bottom-color:var(--green)}
+main{padding-top:6px}
+.pane{display:none;animation:fade .15s ease}.pane.on{display:block}.pane>h2:first-child,.pane>.head:first-child{margin-top:10px}
+@keyframes fade{from{opacity:.4}to{opacity:1}}
+.scroll{max-height:calc(100dvh - 210px)}
+/* ---- phone (Fold 6 gập, iPhone, Android thường) ---- */
+html[data-dev=phone] body{font-size:13px}
+html[data-dev=phone] main{padding:6px 10px 40px}
+html[data-dev=phone] .top{padding-left:10px;padding-right:10px}
+html[data-dev=phone] h1{font-size:15px}
+html[data-dev=phone] h2{font-size:11.5px;margin:18px 0 8px}
+html[data-dev=phone] .tabs button{font-size:12.5px;padding:8px 9px}
+html[data-dev=phone] .kpis{grid-template-columns:repeat(2,minmax(0,1fr));gap:6px}
+html[data-dev=phone] .kpis div{padding:8px}html[data-dev=phone] .kpis b{font-size:16px}
+html[data-dev=phone] .ball{width:34px;height:34px;font-size:14px}
+html[data-dev=phone] .others{grid-template-columns:1fr}
+html[data-dev=phone] table{font-size:11.5px}html[data-dev=phone] th,html[data-dev=phone] td{padding:5px 6px}
+html[data-dev=phone] .scroll td:first-child,html[data-dev=phone] .scroll th:first-child{position:sticky;left:0;background:var(--panel);z-index:1}
+html[data-dev=phone] .picks{grid-template-columns:1fr}
+html[data-dev=phone] .note{font-size:11.5px}
+html[data-dev=phone] .grp{padding:10px}
+html[data-dev=phone] .chips{flex-wrap:nowrap;overflow-x:auto;scrollbar-width:none;margin-bottom:8px}html[data-dev=phone] .chips::-webkit-scrollbar{display:none}
+html[data-dev=phone] .chip{flex:0 0 auto;font-size:11px;padding:2px 8px}
+html[data-dev=phone] .sug{gap:6px}
+html[data-dev=phone] .spots{flex-wrap:nowrap}html[data-dev=phone] .spots button{flex:1 1 0;min-width:0;padding:5px 0;text-align:center;font-size:12px}
+html[data-dev=phone] .others{font-size:11.5px;gap:2px}html[data-dev=phone] .others b{width:84px}
+/* ---- Fold mở / tablet ---- */
+html[data-dev=fold] main,html[data-dev=tablet] main{padding:8px 14px 40px}
+html[data-dev=fold] .kpis{grid-template-columns:repeat(3,minmax(0,1fr))}
+html[data-dev=fold] .ball{width:40px;height:40px;font-size:16px}
+html[data-dev=fold] .others{grid-template-columns:repeat(2,minmax(0,1fr))}
+html[data-dev=fold] table{font-size:12px}
+.up{grid-template-columns:minmax(0,1fr)}.grp{min-width:0}.pane{min-width:0}
+html[data-dev=phone] .ball{width:27px;height:27px;font-size:12.5px;border-width:1.5px}
+html[data-dev=phone] .sug{gap:3px}html[data-dev=phone] .scroll{max-height:56dvh}
+/* fallback khi chưa chạy JS */
+@media (max-width:599px){body{font-size:13px}main{padding:6px 10px 40px}.ball{width:34px;height:34px;font-size:14px}.kpis{grid-template-columns:repeat(2,minmax(0,1fr))}}
+"""
+
+TAB_JS = r"""<script>
+(function(){
+ var H=document.documentElement,tabs=[].slice.call(document.querySelectorAll('#tabs button')),dev=document.getElementById('dev');
+ function store(k,v){try{if(v===undefined)return localStorage.getItem(k);localStorage.setItem(k,v)}catch(e){return null}}
+ function show(t,push){var ok=false;tabs.forEach(function(b){var on=b.dataset.t===t;b.classList.toggle('on',on);if(on){ok=true;b.scrollIntoView({block:'nearest',inline:'center'})}});
+  if(!ok)return show('sug');
+  document.querySelectorAll('.pane').forEach(function(p){p.classList.toggle('on',p.id==='t-'+t)});
+  store('keno-tab',t);if(push!==false&&location.hash!=='#'+t)history.replaceState(null,'','#'+t);window.scrollTo(0,0)}
+ tabs.forEach(function(b){b.onclick=function(){show(b.dataset.t)}});
+ show((location.hash||'').slice(1)||store('keno-tab')||'sug',false);
+ window.addEventListener('hashchange',function(){show(location.hash.slice(1),false)});
+ // nhận biết loại màn hình: phone / Fold mở / tablet / desktop — chạy lại khi gập/mở máy hoặc xoay
+ function classify(){
+  var w=window.innerWidth,h=window.innerHeight,r=Math.max(w,h)/Math.min(w,h),touch=matchMedia('(pointer:coarse)').matches,ua=navigator.userAgent;
+  var fold=/SM-F9[0-9]{2}/.test(ua),d,label;
+  if(w<600){d='phone';label=fold?'Fold · gập':(touch?'Điện thoại':'Cửa sổ hẹp')}
+  else if(touch&&w<1100&&r<1.45){d='fold';label=fold?'Fold · mở':'Màn vuông'}
+  else if(touch&&w<1100){d='tablet';label='Tablet'}
+  else{d='desktop';label='Máy tính'}
+  H.dataset.dev=d;if(dev)dev.textContent=label+' · '+w+'px'}
+ classify();window.addEventListener('resize',classify);window.addEventListener('orientationchange',classify);
+ // vuốt trái/phải để đổi tab trên điện thoại
+ var x0=null,y0=null;document.querySelector('main').addEventListener('touchstart',function(e){
+  if(e.target.closest('.scroll,.spots,.chips')){x0=null;return}x0=e.touches[0].clientX;y0=e.touches[0].clientY},{passive:true});
+ document.querySelector('main').addEventListener('touchend',function(e){if(x0===null)return;
+  var dx=e.changedTouches[0].clientX-x0,dy=e.changedTouches[0].clientY-y0;x0=null;
+  if(Math.abs(dx)<70||Math.abs(dy)>Math.abs(dx)*0.6)return;
+  var i=tabs.findIndex(function(b){return b.classList.contains('on')}),j=i+(dx<0?1:-1);
+  if(j>=0&&j<tabs.length)show(tabs[j].dataset.t)},{passive:true});
+ // tự tải lại mỗi 3 phút khi đang mở trang (giữ nguyên tab đang xem)
+ setInterval(function(){if(!document.hidden)location.reload()},180000);
+})();
+</script>"""
+
 UP_JS = r"""<script>
 (function(){
   var D; try { D = JSON.parse(document.getElementById('updata').textContent); } catch(e) { return; }
@@ -677,8 +759,8 @@ mỗi vé $1 trung bình chỉ trả lại khoảng 62¢.</p>
                         f"<table class='small'><tr><th>Tín hiệu</th><th>Trọng số</th><th></th></tr>{lrows}</table>")
 
     theo = " · ".join(f"{k} số: {theo_return(k)*100:.1f}%" for k in cfg.get("spots", [5, 6, 7, 8, 9, 10]))
-    page = f"""<!doctype html><html lang="vi"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
-<title>KenoAuto Report</title><meta http-equiv="refresh" content="180">
+    page = f"""<!doctype html><html lang="vi"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1,viewport-fit=cover">
+<title>KenoAuto Report</title><meta name="theme-color" content="#07090b">
 <style>
 :root{{--bg:#07090b;--panel:#0d1116;--line:#1b2127;--fg:#d7dee4;--muted:#7d8a95;--green:#3ddc97;--amber:#f5a524;--red:#ff6b5b}}
 *{{box-sizing:border-box}}body{{margin:0;background:var(--bg);color:var(--fg);font:14px/1.5 ui-monospace,Consolas,monospace}}
@@ -701,27 +783,39 @@ td.big{{color:#05100b;background:var(--green);font-weight:700}}
 .sug{{display:flex;flex-wrap:wrap;gap:8px;margin:6px 0 4px}}.ball{{width:44px;height:44px;border-radius:50%;display:flex;align-items:center;justify-content:center;font-size:17px;font-weight:700;background:#132a20;color:var(--green);border:2px solid var(--green)}}
 .spots{{display:flex;flex-wrap:wrap;gap:4px;margin:10px 0}}.spots button{{white-space:nowrap;background:var(--bg);color:var(--muted);border:1px solid var(--line);border-radius:4px;padding:4px 10px;font:inherit;cursor:pointer}}.spots button.on{{color:var(--green);border-color:var(--green)}}
 .others{{display:grid;grid-template-columns:repeat(auto-fit,minmax(250px,1fr));gap:4px 16px;margin-top:10px;font-size:12.5px}}.others b{{display:inline-block;width:92px}}table.small td:last-child{{width:40%}}.note{{color:var(--muted);font-size:12.5px;max-width:880px}}
-</style></head><body><main>
-<h1>KENOAUTO · HOT SPOT</h1>
-<div class="muted">Cập nhật {kdb.now_str()} · {live[0]:,} kỳ log tự động (mới nhất {e(str(live[1]))}) · {imported:,} kỳ cũ nhập · {hist_n[0]:,} kỳ lịch sử tải ngược{(' (từ ' + e(str(hist_n[1])) + ')') if hist_n[0] else ''} · trạng thái: {e(str(status.get('state','?')))} ({e(str(status.get('mode','')))}{' · GitHub' if status.get('runner')=='github' else ''})<br>{e(kinds_txt)}</div>
-{upcoming_html}
-{prereg_html(con, cfg)}
-{wallet}
-<h2>Kết luận</h2><div class="head">{e(head)}</div>
-<h2>Máy quay có ngẫu nhiên không?</h2>{rnd_html}
-<h2>z-score tích lũy · vé 10 số</h2>{zchart(con)}
-<p class="note">Đường nằm trong dải ±1.96 là bình thường cho may rủi. Một engine có lợi thế thật sẽ đi lên đều đặn và ở lại phía trên; đường chạm dải rồi quay về 0 là nhiễu.</p>
+{TAB_CSS}
+</style></head><body>
+<header class="top">
+<div class="brand"><h1>KENOAUTO · HOT SPOT</h1><span id="dev" class="dev"></span></div>
+<details class="meta"><summary>Cập nhật {kdb.now_str()} · {live[0] + hist_n[0]:,} kỳ</summary>
+<div class="muted">{live[0]:,} kỳ log tự động (mới nhất {e(str(live[1]))}) · {imported:,} kỳ cũ nhập · {hist_n[0]:,} kỳ lịch sử tải ngược{(' (từ ' + e(str(hist_n[1])) + ')') if hist_n[0] else ''} · trạng thái: {e(str(status.get('state','?')))} ({e(str(status.get('mode','')))}{' · GitHub' if status.get('runner')=='github' else ''})<br>{e(kinds_txt)}</div></details>
+<nav class="tabs" id="tabs">
+<button data-t="sug">🎯 Gợi ý</button><button data-t="log">📒 Nhật ký</button><button data-t="eng">🏁 Engine</button>
+<button data-t="pre">🧪 Kiểm định</button><button data-t="wal">💵 Ví ảo</button><button data-t="rnd">🎲 Ngẫu nhiên</button>
+<button data-t="lab">🔬 Lab</button><button data-t="time">🕒 Giờ & ngày</button><button data-t="ai">🧠 AI học</button>
+</nav></header>
+<main>
+<section class="pane" id="t-sug">{upcoming_html}</section>
+<section class="pane" id="t-log">{log_html}</section>
+<section class="pane" id="t-eng">
+<div class="head">{e(head)}</div>
 <h2>Bảng điểm engine (chỉ vé khóa trước kỳ quay)</h2>
 <div class="scroll"><table><tr><th>Engine</th><th>Số</th><th>Kỳ</th><th>TB trúng</th><th>Kỳ vọng</th><th>z</th><th>p</th><th>p hiệu chỉnh</th><th>Trả về / $1 (lý thuyết)</th><th>Trúng hết (kỳ vọng)</th><th>Đánh giá</th></tr>{''.join(rows_html)}</table></div>
-<p class="note">p hiệu chỉnh dùng Holm-Bonferroni vì đang thử {len([r for r in tab if r['engine']!='RANDOM'])} tổ hợp cùng lúc — thử càng nhiều, càng dễ có cái "trông nóng" do may. Tỷ lệ trả về lý thuyết của vé Hot Spot $1: {theo}.</p>
+<p class="note">p hiệu chỉnh dùng Holm-Bonferroni vì đang thử {len([r for r in tab if r['engine']!='RANDOM'])} tổ hợp cùng lúc. Tỷ lệ trả về lý thuyết của vé Hot Spot $1: {theo}.</p>
+<h2>z-score tích lũy · vé 10 số</h2>{zchart(con)}
+<p class="note">Đường nằm trong dải ±1.96 là bình thường cho may rủi. Một engine có lợi thế thật sẽ đi lên đều đặn và ở lại phía trên.</p>
+</section>
+<section class="pane" id="t-pre">{prereg_html(con, cfg)}</section>
+<section class="pane" id="t-wal">{wallet}</section>
+<section class="pane" id="t-rnd"><h2>Máy quay có ngẫu nhiên không?</h2>{rnd_html}</section>
+<section class="pane" id="t-lab">{lab_html(con, cfg)}</section>
+<section class="pane" id="t-time">{tt_html}
 <h2>Theo ngày · TB trúng vé 10 số (kỳ vọng 2.50)</h2>
 <div class="scroll"><table><tr><th>Ngày</th><th>Kỳ log</th><th>Bỏ lỡ</th><th>Kỳ chấm</th>{''.join(f'<th>{n}</th>' for n in names)}</tr>{''.join(day_rows)}</table></div>
-{log_html}
-{lab_html(con, cfg)}
-{tt_html}
-{learned_html}
-<h2>PATTERN · AI học được gì</h2>{model_html}
+</section>
+<section class="pane" id="t-ai">{learned_html}<h2>PATTERN · AI học được gì</h2>{model_html}</section>
 {UP_JS}
+{TAB_JS}
 </main></body></html>"""
     path = os.path.join(OUT, "latest.html")
     with open(path, "w", encoding="utf-8") as f:
