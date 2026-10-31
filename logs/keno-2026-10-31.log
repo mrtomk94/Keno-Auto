@@ -1,0 +1,5 @@
+2026-10-31 04:04:59,732 INFO backfilled 55 of 55 missed draw(s)
+2026-10-31 04:04:59,816 INFO logged 56 new draw(s): 3315352, 3315353, 3315354, 3315355, 3315356
+2026-10-31 04:08:18,335 INFO history: +198 older draws (now back to #3281239, 34058 real draws total)
+2026-10-31 04:08:20,097 INFO PATTERN retrained on 2000 draws: freq z (30)=-0.008, gap (log)=+0.011, lag-1=+0.020, lag-2=-0.005, lag-3=+0.006, pair affinity=+0.051, row momentum=-0.003, col momentum=+0.005, 10-draw burst=+0.005, gap dueness=-0.009
+2026-10-31 04:08:22,389 INFO batch done: latest 3315356 (was 3315300), 35468 draws total
