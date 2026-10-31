@@ -1,0 +1,74 @@
+{
+  "page_url": "https://www.calottery.com/en/draw-games/hot-spot",
+  "api_base": "https://www.calottery.com/api/DrawGameApi/DrawGamePastDrawResults",
+  "hotspot_game_id": -1,
+  "browser_channel": "msedge",
+  "headless": true,
+  "poll_seconds": 60,
+  "page_reload_minutes": 30,
+  "backfill_max_pages": 20,
+  "api_page_size": 50,
+  "spots": [
+    5,
+    6,
+    7,
+    8,
+    9,
+    10
+  ],
+  "hot_window": 30,
+  "pattern_retrain_every": 100,
+  "report_every_minutes": 60,
+  "significance_alpha": 0.05,
+  "past_url": "https://www.calottery.com/en/draw-games/hot-spot/past-winning-numbers",
+  "backfill_max_draws": 300,
+  "first_run_backfill": 260,
+  "lock_horizon": 20,
+  "history_per_run": 200,
+  "history_target": 60000,
+  "history_delay": 0.5,
+  "learned_retrain_every": 500,
+  "learned_window": 3000,
+  "learned_rounds": 5,
+  "wallets": [
+    {
+      "name": "Vòng lặp tự chọn (7 ngày)",
+      "adaptive": true,
+      "lookback": 7
+    },
+    {
+      "name": "Mất ít nhất · 5 số · 25 kỳ",
+      "engine": "RANDOM",
+      "spot": 5,
+      "be": false,
+      "max_draws": 25,
+      "levels": false
+    },
+    {
+      "name": "GAP 10 số + Bulls-Eye",
+      "engine": "GAP",
+      "spot": 10,
+      "be": true,
+      "levels": true
+    }
+  ],
+  "prereg": {
+    "engine": "CLUSTER",
+    "baseline": "RANDOM",
+    "spot": 10,
+    "min_hits": 5,
+    "start_draw": 3314425,
+    "n_target": 3000,
+    "threshold_rate": 0.0721,
+    "alpha": 0.05,
+    "registered": "28/10/2026 00:22 PT"
+  },
+  "lab": true,
+  "prereg2": {
+    "engine": "CLUSTER",
+    "start_draw": 3314425,
+    "n_target": 8400,
+    "z_threshold": 1.645,
+    "registered": "28/10/2026 00:40 PT"
+  }
+}

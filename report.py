@@ -211,7 +211,13 @@ def upcoming(con):
         d = targets.setdefault(t, {"draw": t, "basis": b, "locked": created, "picks": {},
                                    "eta": (base_ms + (t - base_id) * 240000) if base_ms else None})
         d["picks"][en] = json.loads(rk)
-    return {"latest": base_id, "latest_ms": base_ms, "targets": list(targets.values())}
+    fb = None
+    last = con.execute("SELECT MAX(basis_draw) FROM predictions WHERE kind='live'").fetchone()[0]
+    if last:
+        picks = {en: json.loads(rk) for en, rk in con.execute(
+            "SELECT engine, ranked FROM predictions WHERE basis_draw=? AND kind='live' GROUP BY engine", (last,))}
+        fb = {"basis": last, "picks": picks}
+    return {"latest": base_id, "latest_ms": base_ms, "targets": list(targets.values()), "fallback": fb}
 
 
 def prediction_log(con, limit=40):
@@ -561,7 +567,7 @@ html[data-dev=fold] .kpis{grid-template-columns:repeat(3,minmax(0,1fr))}
 html[data-dev=fold] .ball{width:40px;height:40px;font-size:16px}
 html[data-dev=fold] .others{grid-template-columns:repeat(2,minmax(0,1fr))}
 html[data-dev=fold] table{font-size:12px}
-.up{grid-template-columns:minmax(0,1fr)}.grp{min-width:0}.pane{min-width:0}
+.up{grid-template-columns:minmax(0,1fr)}.stale{font-size:11.5px;color:var(--amber);margin:4px 0 2px}.grp{min-width:0}.pane{min-width:0}
 html[data-dev=phone] .ball{width:27px;height:27px;font-size:12.5px;border-width:1.5px}
 html[data-dev=phone] .sug{gap:3px}html[data-dev=phone] .scroll{max-height:56dvh}
 /* fallback khi chưa chạy JS */
@@ -610,17 +616,27 @@ UP_JS = r"""<script>
   function tm(ms){ return new Date(ms).toLocaleTimeString('en-US',{hour:'numeric',minute:'2-digit',timeZone:'America/Los_Angeles'}); }
   function render(){
     var now = Date.now();
-    var live = D.targets.filter(function(t){ return !t.eta || t.eta > now - 30000; }).slice(0, 5);
-    if (!live.length) { box.innerHTML = '<div class="grp muted">Các kỳ đã khóa đều đã quay xong. Bộ số mới sẽ có sau lần cập nhật kế tiếp (thường trong ~15 phút) — trang tự tải lại.</div>'; return; }
+    var live = D.targets.filter(function(t){ return !t.eta || t.eta > now - 30000; }).slice(0, 5), stale = false;
+    if (!live.length && D.fallback) {
+      // các kỳ đã khóa đều đã quay: vẫn hiện bộ số mới nhất cho các kỳ kế tiếp (ước tính)
+      stale = true;
+      var k0 = D.latest_ms ? Math.max(1, Math.ceil((now - D.latest_ms) / 240000)) : 1;
+      for (var i = 0; i < 5; i++) {
+        var id = D.latest + k0 + i;
+        live.push({draw: id, basis: D.fallback.basis, picks: D.fallback.picks, eta: D.latest_ms ? D.latest_ms + (id - D.latest) * 240000 : null});
+      }
+    }
+    if (!live.length) { box.innerHTML = '<div class="grp muted">Chưa có bộ số nào được khóa.</div>'; return; }
     var groups = {}; live.forEach(function(t){ (groups[t.basis] = groups[t.basis] || []).push(t); });
     var html = '';
     Object.keys(groups).forEach(function(b){
-      var ts = groups[b], p = ts[0].picks, s = D.suggested;
+      var ts = groups[b], p = ts[0].picks, s = p[D.suggested] ? D.suggested : Object.keys(p)[0];
       html += '<div class="grp"><div class="chips">' + ts.map(function(t, i){
         var left = t.eta ? Math.max(0, Math.round((t.eta - now) / 1000)) : null;
         var lab = '#' + t.draw + (t.eta ? ' · ~' + tm(t.eta) + (left !== null && left < 600 ? ' · còn ' + Math.floor(left/60) + ':' + ('0'+left%60).slice(-2) : '') : '');
         return '<span class="chip' + (i === 0 ? ' now' : '') + '">' + lab + '</span>'; }).join('') + '</div>';
       html += '<div class="muted" style="font-size:12px">GỢI Ý · <b style="color:' + D.colors[s] + '">' + s + '</b> · vé ' + spot + ' số · khóa từ kỳ #' + b + '</div>';
+      if (stale) html += '<div class="stale">Bộ số mới nhất · dùng tiếp cho các kỳ kế (số kỳ &amp; giờ là ước tính). Bộ mới sẽ thay sau lần chạy GitHub kế tiếp.</div>';
       html += '<div class="sug">' + p[s].slice(0, spot).map(function(n){ return '<div class="ball">' + n + '</div>'; }).join('') + '</div>';
       html += '<div class="spots">' + [5,6,7,8,9,10].map(function(k){ return '<button data-k="' + k + '" class="' + (k === spot ? 'on' : '') + '">' + k + ' số</button>'; }).join('') + '</div>';
       html += '<div class="others">' + D.order.filter(function(e){ return e !== s && p[e]; }).map(function(e){
@@ -782,7 +798,7 @@ td.big{{color:#05100b;background:var(--green);font-weight:700}}
 .chips{{display:flex;flex-wrap:wrap;gap:6px;margin-bottom:12px}}.chip{{border:1px solid var(--line);border-radius:14px;padding:3px 10px;font-size:12px}}.chip.now{{border-color:var(--green);color:var(--green)}}
 .sug{{display:flex;flex-wrap:wrap;gap:8px;margin:6px 0 4px}}.ball{{width:44px;height:44px;border-radius:50%;display:flex;align-items:center;justify-content:center;font-size:17px;font-weight:700;background:#132a20;color:var(--green);border:2px solid var(--green)}}
 .spots{{display:flex;flex-wrap:wrap;gap:4px;margin:10px 0}}.spots button{{white-space:nowrap;background:var(--bg);color:var(--muted);border:1px solid var(--line);border-radius:4px;padding:4px 10px;font:inherit;cursor:pointer}}.spots button.on{{color:var(--green);border-color:var(--green)}}
-.others{{display:grid;grid-template-columns:repeat(auto-fit,minmax(250px,1fr));gap:4px 16px;margin-top:10px;font-size:12.5px}}.others b{{display:inline-block;width:92px}}table.small td:last-child{{width:40%}}.note{{color:var(--muted);font-size:12.5px;max-width:880px}}
+.others{{display:grid;grid-template-columns:repeat(auto-fit,minmax(340px,1fr));gap:4px 16px;margin-top:10px;font-size:12.5px}}.others b{{display:inline-block;width:92px}}table.small td:last-child{{width:40%}}.note{{color:var(--muted);font-size:12.5px;max-width:880px}}
 {TAB_CSS}
 </style></head><body>
 <header class="top">
