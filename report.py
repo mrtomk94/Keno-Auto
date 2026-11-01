@@ -490,6 +490,101 @@ def prereg_html(con, cfg):
 </div><p class="note {cls}" style="font-size:13.5px">{verdict}</p>{prereg2}"""
 
 
+def zfocus_html(con, cfg):
+    """Focus tab for one engine the user picked (config focus_engine), plus its pre-registered test H3."""
+    en = cfg.get("focus_engine")
+    if not en:
+        return "<p class='muted'>Chưa chọn engine theo dõi (config focus_engine).</p>"
+    e_ = html.escape
+    sd = math.sqrt(10 * .25 * .75 * 70 / 79)
+    rows = con.execute("""SELECT r.target_draw, r.hits, r.bullseye_hit, d.draw_date FROM results r JOIN draws d ON d.draw_id=r.target_draw
+                          WHERE r.engine=? AND r.spot=10 AND r.valid=1 ORDER BY r.target_draw""", (en,)).fetchall()
+    n = len(rows)
+    if not n:
+        return f"<h2>{e_(en)}</h2><p class='muted'>Chưa có kỳ nào được chấm.</p>"
+    P = [math.comb(10, h) * math.comb(70, 20 - h) / math.comb(80, 20) for h in range(11)]
+    hits = [r[1] for r in rows]
+    mean = sum(hits) / n
+    z = (mean - 2.5) / (sd / math.sqrt(n))
+    big = sum(h >= 7 for h in hits)
+    p7 = sum(P[7:])
+    # per day (Pacific date of the draw)
+    days = {}
+    for d_id, h, be, ds in rows:
+        ms = draw_epoch(ds)
+        key = dt.datetime.fromtimestamp(ms / 1000, _PT).strftime("%m/%d") if ms else "?"
+        days.setdefault(key, []).append(h)
+    drows = "".join(
+        f"<tr><td>{k}</td><td>{len(v)}</td><td>{sum(v)/len(v):.3f}</td><td>{(sum(v)/len(v)-2.5)/(sd/math.sqrt(len(v))):+.2f}</td>"
+        f"<td>{sum(x>=5 for x in v)/len(v)*100:.1f}%</td><td>{sum(x>=7 for x in v)}</td><td>{max(v)}</td></tr>"
+        for k, v in list(days.items())[-10:][::-1])
+    last_day, today = list(days.items())[-1]
+    # hit distribution vs theory
+    cnt = [hits.count(h) for h in range(11)]
+    hs_ = [h for h in range(11) if cnt[h] or P[h] * n >= 0.5]
+    dist = ("<tr><th>Trúng</th>" + "".join(f"<th>{h}</th>" for h in hs_) + "</tr><tr><td>Thật</td>" + "".join(f"<td>{cnt[h]:,}</td>" for h in hs_)
+            + "</tr><tr><td class='muted'>May rủi</td>" + "".join(f"<td class='muted'>{P[h]*n:,.1f}</td>" for h in hs_) + "</tr>")
+    bigs = [(d, h, be, ds) for d, h, be, ds in rows if h >= 6][-8:][::-1]
+    def _short(ds):
+        ms = draw_epoch(ds)
+        return dt.datetime.fromtimestamp(ms / 1000, _PT).strftime("%m/%d %I:%M %p") if ms else str(ds)
+    blist = "".join(f"<tr><td>#{d}</td><td>{_short(ds)}</td><td class='{'big' if h >= 7 else ''}'>{h}/10</td><td>{'✓' if be else ''}</td></tr>" for d, h, be, ds in bigs)
+    # current ticket
+    tk = con.execute("SELECT ranked, basis_draw FROM predictions WHERE engine=? AND kind='live' ORDER BY target_draw DESC LIMIT 1", (en,)).fetchone()
+    balls = "".join(f"<div class='ball'>{x}</div>" for x in json.loads(tk[0])) if tk else ""
+    # lab versions of this family
+    labrow = ""
+    try:
+        import lab
+        t = lab.table(con).get(en, [])
+        if t:
+            labrow = (f"<h2>10 phiên bản trong lab · {t[0][2]:,} kỳ mỗi bản (vé 10 số)</h2><div class='scroll'><table>"
+                      "<tr><th>Bản</th>" + "".join(f"<th>v{v} · {e_(str(p_))}</th>" for v, p_, m_, a, zz, r5 in t) + "</tr>"
+                      "<tr><td>TB</td>" + "".join(f"<td>{a:.3f}</td>" for v, p_, m_, a, zz, r5 in t) + "</tr>"
+                      "<tr><td>z</td>" + "".join(f"<td class='{'warnt' if abs(zz) >= 2 else ''}'>{zz:+.2f}</td>" for v, p_, m_, a, zz, r5 in t) + "</tr>"
+                      "</table></div><p class='note'>Cửa sổ = số kỳ gần nhất dùng để tìm vùng nóng. v1 là bản đang chạy.</p>")
+    except Exception:
+        pass
+    # pre-registered H3
+    h3 = ""
+    pr = cfg.get("prereg3")
+    if pr and pr.get("engine") == en:
+        st = dt.datetime.strptime(pr["start_time"], "%Y-%m-%d %H:%M").replace(tzinfo=_PT).timestamp() * 1000
+        live = [(d, h) for d, h, be, ds in rows if d > pr["after_draw"] and (draw_epoch(ds) or 0) >= st]
+        live_ids = {r[0] for r in con.execute("SELECT target_draw FROM predictions WHERE engine=? AND kind='live' AND target_draw>?", (en, pr["after_draw"]))}
+        live = [x for x in live if x[0] in live_ids]
+        n3 = len(live)
+        m3 = sum(h for _, h in live) / n3 if n3 else 0
+        z3 = (m3 - 2.5) / (sd / math.sqrt(n3)) if n3 else 0
+        b3 = sum(h >= pr["big_min"] for _, h in live)
+        exp3 = p7 * n3
+        if n3 < pr["n_target"]:
+            v3 = f"Đang thu thập {n3:,}/{pr['n_target']:,} kỳ — số tạm thời, <b>chưa dùng để kết luận</b>."
+        else:
+            ok1, ok2 = z3 >= pr["z_threshold"], b3 >= pr["big_needed"]
+            v3 = ("ĐẠT" if ok1 or ok2 else "KHÔNG ĐẠT") + f" sau {n3:,} kỳ (TB: {'đạt' if ok1 else 'không'} · trúng lớn: {'đạt' if ok2 else 'không'})."
+        h3 = f"""<div class="head"><b>Giả thuyết 3 (ghi {e_(pr['registered'])}):</b> {e_(en)} đoán tốt hơn may rủi. Mẫu {pr['n_target']:,} kỳ live tính từ kỳ đầu tiên sau {e_(pr['start_time'])} PT.
+Đạt nếu (a) TB trúng vé 10 số có z ≥ {pr['z_threshold']} <b>hoặc</b> (b) có ≥ {pr['big_needed']} lần trúng ≥{pr['big_min']}/10 (may rủi cho ~{p7*pr['n_target']:.1f}).</div>
+<div style="background:var(--line);border-radius:4px;height:10px;margin:8px 0"><div style="width:{min(100, n3 / pr['n_target'] * 100):.1f}%;height:10px;border-radius:4px;background:var(--green)"></div></div>
+<div class="kpis"><div><span>H3 · TB trúng</span><b>{m3:.3f}</b><em>{n3:,} kỳ · z {z3:+.2f}</em></div>
+<div><span>H3 · trúng ≥{pr['big_min']}/10</span><b>{b3}</b><em>may rủi ~{exp3:.1f} · cần ≥ {pr['big_needed']} khi đủ mẫu</em></div></div>
+<p class="note">{v3}</p>"""
+    return f"""<h2>Engine theo dõi · {e_(en)} · vé hiện tại (khóa từ kỳ #{tk[1] if tk else '—'})</h2>
+<div class="sug">{balls}</div>
+{h3}
+<h2>Toàn bộ thời gian live</h2>
+<div class="kpis"><div><span>TB trúng / 10</span><b>{mean:.3f}</b><em>{n:,} kỳ · z {z:+.2f} · may rủi 2.500</em></div>
+<div><span>Ngày gần nhất · {last_day}</span><b>{sum(today)/len(today):.3f}</b><em>{len(today)} kỳ · cao nhất {max(today)}/10</em></div>
+<div><span>Trúng ≥5/10</span><b>{sum(h >= 5 for h in hits)/n*100:.2f}%</b><em>may rủi {sum(P[5:])*100:.2f}%</em></div>
+<div><span>Trúng ≥7/10</span><b>{big}</b><em>may rủi ~{p7*n:.1f}</em></div></div>
+<div class="zgrid">
+<div><h2>Theo ngày</h2><div class="scroll"><table><tr><th>Ngày</th><th>Kỳ</th><th>TB</th><th>z</th><th>≥5</th><th>≥7</th><th>Cao nhất</th></tr>{drows}</table></div></div>
+<div><h2>Lần trúng ≥6 gần nhất</h2><div class="scroll"><table><tr><th>Kỳ</th><th>Giờ</th><th>Trúng</th><th>BE</th></tr>{blist}</table></div></div>
+</div>
+<h2>Phân bố số trúng (vé 10 số) · thật so với may rủi</h2><div class="scroll"><table>{dist}</table></div>
+{labrow}"""
+
+
 def lab_html(con, cfg):
     """Engine lab: 10 versions per family, scored like everything else."""
     if not cfg.get("lab", True):
@@ -567,7 +662,7 @@ html[data-dev=fold] .kpis{grid-template-columns:repeat(3,minmax(0,1fr))}
 html[data-dev=fold] .ball{width:40px;height:40px;font-size:16px}
 html[data-dev=fold] .others{grid-template-columns:repeat(2,minmax(0,1fr))}
 html[data-dev=fold] table{font-size:12px}
-.up{grid-template-columns:minmax(0,1fr)}.stale{font-size:11.5px;color:var(--amber);margin:4px 0 2px}.grp{min-width:0}.pane{min-width:0}
+.zgrid{display:grid;grid-template-columns:repeat(auto-fit,minmax(260px,1fr));gap:0 14px}.zgrid>div{min-width:0}.up{grid-template-columns:minmax(0,1fr)}.stale{font-size:11.5px;color:var(--amber);margin:4px 0 2px}.grp{min-width:0}.pane{min-width:0}
 html[data-dev=phone] .ball{width:27px;height:27px;font-size:12.5px;border-width:1.5px}
 html[data-dev=phone] .sug{gap:3px}html[data-dev=phone] .scroll{max-height:56dvh}
 /* fallback khi chưa chạy JS */
@@ -733,11 +828,15 @@ def build(con, cfg, archive_day=None):
                      f"Vé k số = k số đầu tiên.</p><div class='picks'>{cards}</div>")
 
     sug, sug_row = suggested_engine(tab)
+    focus = cfg.get("focus_engine")
+    if focus and focus in engines.ENGINES:
+        sug, sug_row = focus, next((r for r in tab if r["engine"] == focus and r["spot"] == 10), None)
     up = upcoming(con)
     up["suggested"] = sug
     up["order"] = list(engines.ENGINES)
     up["colors"] = COLORS
-    sug_txt = (f"Gợi ý = engine có thành tích vé 10 số tốt nhất tới giờ: <b>{sug}</b> "
+    sug_txt = (f"Gợi ý = engine bạn chọn theo dõi: <b>{sug}</b> (z = {sug_row['z']:+.2f}, {sug_row['n']:,} kỳ — {e(sug_row['verdict'])})." if focus and sug_row and sug == focus else
+               f"Gợi ý = engine có thành tích vé 10 số tốt nhất tới giờ: <b>{sug}</b> "
                f"(z = {sug_row['z']:+.2f}, {sug_row['n']:,} kỳ — {e(sug_row['verdict'])})." if sug_row else
                "Chưa đủ 200 kỳ để xếp hạng — tạm gợi ý HOT.")
     upcoming_html = f"""<h2>Số gợi ý · các kỳ sắp tới</h2>
@@ -806,12 +905,13 @@ td.big{{color:#05100b;background:var(--green);font-weight:700}}
 <details class="meta"><summary>Cập nhật {kdb.now_str()} · {live[0] + hist_n[0]:,} kỳ</summary>
 <div class="muted">{live[0]:,} kỳ log tự động (mới nhất {e(str(live[1]))}) · {imported:,} kỳ cũ nhập · {hist_n[0]:,} kỳ lịch sử tải ngược{(' (từ ' + e(str(hist_n[1])) + ')') if hist_n[0] else ''} · trạng thái: {e(str(status.get('state','?')))} ({e(str(status.get('mode','')))}{' · GitHub' if status.get('runner')=='github' else ''})<br>{e(kinds_txt)}</div></details>
 <nav class="tabs" id="tabs">
-<button data-t="sug">🎯 Gợi ý</button><button data-t="log">📒 Nhật ký</button><button data-t="eng">🏁 Engine</button>
+<button data-t="sug">🎯 Gợi ý</button><button data-t="zf">🔲 {e(cfg.get('focus_engine') or 'Theo dõi')}</button><button data-t="log">📒 Nhật ký</button><button data-t="eng">🏁 Engine</button>
 <button data-t="pre">🧪 Kiểm định</button><button data-t="wal">💵 Ví ảo</button><button data-t="rnd">🎲 Ngẫu nhiên</button>
 <button data-t="lab">🔬 Lab</button><button data-t="time">🕒 Giờ & ngày</button><button data-t="ai">🧠 AI học</button>
 </nav></header>
 <main>
 <section class="pane" id="t-sug">{upcoming_html}</section>
+<section class="pane" id="t-zf">{zfocus_html(con, cfg)}</section>
 <section class="pane" id="t-log">{log_html}</section>
 <section class="pane" id="t-eng">
 <div class="head">{e(head)}</div>

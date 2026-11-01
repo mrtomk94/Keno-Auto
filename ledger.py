@@ -37,6 +37,8 @@ def maybe_relearn(con, cfg, upto, force=False):
     every = cfg.get("learned_retrain_every", 500)
     m = kdb.meta_get(con, "learned_model")
     real = con.execute("SELECT COUNT(*) FROM draws WHERE source!='import' AND draw_id<=?", (upto,)).fetchone()[0]
+    if m and len(m.get("w", [])) != len(learn.SIGNALS):
+        force = True                          # new signals were added -> learn again right away
     if real < 1000 or (not force and m and m.get("upto", 0) <= upto and real - m.get("at_count", 0) < every):
         return m
     rows = con.execute("SELECT draw_id, numbers FROM draws WHERE source!='import' AND draw_id<=? "

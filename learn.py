@@ -1,6 +1,6 @@
 """LEARNED engine: searches for the best combination of signals on past draws, in a loop.
 
-Each candidate = a weight vector over 14 signals. Score of number n before draw t+1 = sum(w_k * signal_k).
+Each candidate = a weight vector over 17 signals (14 original + 3 Z-BLOCK zone/block signals). Score of number n before draw t+1 = sum(w_k * signal_k).
 Ticket = the 10 highest scores. Fitness = average hits on the NEXT draw, measured on training draws only.
 The loop: random search -> keep the best -> hill-climb around it -> repeat. Then the winner is checked on
 held-out draws it has never seen, which is the only number that tells whether it learned anything real.
@@ -11,7 +11,20 @@ import numpy as np
 
 ROWS, COLS = 8, 10
 SIGNALS = ["freq 5", "freq 10", "freq 30", "freq 100", "freq 300", "gap", "gap²",
-           "lag-1", "lag-2", "lag-3", "pair w/ last", "row heat", "col heat", "neighbor heat"]
+           "lag-1", "lag-2", "lag-3", "pair w/ last", "row heat", "col heat", "neighbor heat",
+           "zone heat 10", "zone heat 200", "block 2×5 heat"]   # last 3 = Z-BLOCK's signals (added 01/11/2026)
+
+
+def _zone(r0, c0, rows=4, cols=5):
+    return [r * COLS + c for r in range(r0, r0 + rows) for c in range(c0, c0 + cols)]
+
+
+ZM = np.zeros((80, 5), np.float32)          # same 5 zones as engines.ZONES
+for _z, _idx in enumerate([_zone(0, 0), _zone(0, 5), _zone(4, 0), _zone(4, 5), _zone(2, 2)]):
+    ZM[_idx, _z] = 1
+BM = np.zeros((80, 16), np.float32)         # 16 blocks of 2 rows x 5 cols
+for _n in range(80):
+    BM[_n, (_n // 10 // 2) * 2 + (_n % 10) // 5] = 1
 
 
 def _zrow(a):
@@ -53,6 +66,10 @@ def signals(X):
     nb[:, :, 1:] += h6[:, :, :-1]
     nb[:, :, :-1] += h6[:, :, 1:]
     out.append(nb.reshape(T, 80))
+    for w in (10, 200):                      # zone heat: each number gets the heat of its hottest zone
+        zh = (win(w) * np.minimum(idx, w)[:, None]) @ ZM
+        out.append((zh[:, None, :] * ZM[None]).max(2))
+    out.append((win(10) * np.minimum(idx, 10)[:, None]) @ BM @ BM.T)   # heat of the number's 2x5 block
     S = np.stack([_zrow(o) for o in out], axis=2).astype(np.float32)
     return S
 
@@ -90,7 +107,10 @@ def search(S, Y, rounds=6, pop=150, seed=0, log=None):
 def predict(X, model):
     """Ranked 10 for the draw after the last row of X."""
     S = signals(X[-400:])
-    sc = S[-1] @ np.array(model["w"], np.float32)
+    w = np.zeros(S.shape[2], np.float32)
+    mw = np.array(model["w"], np.float32)[:S.shape[2]]
+    w[:len(mw)] = mw                          # an older model with fewer signals still works (new ones = 0)
+    sc = S[-1] @ w
     return [int(i) + 1 for i in np.argsort(-sc)[:10]]
 
 
