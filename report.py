@@ -551,8 +551,7 @@ def zfocus_html(con, cfg):
     if pr and pr.get("engine") == en:
         st = dt.datetime.strptime(pr["start_time"], "%Y-%m-%d %H:%M").replace(tzinfo=_PT).timestamp() * 1000
         live = [(d, h) for d, h, be, ds in rows if d > pr["after_draw"] and (draw_epoch(ds) or 0) >= st]
-        live_ids = {r[0] for r in con.execute("SELECT target_draw FROM predictions WHERE engine=? AND kind='live' AND target_draw>?", (en, pr["after_draw"]))}
-        live = [x for x in live if x[0] in live_ids]
+        # every valid ticket counts: live AND walk-forward (both are built only from draws before the target)
         n3 = len(live)
         m3 = sum(h for _, h in live) / n3 if n3 else 0
         z3 = (m3 - 2.5) / (sd / math.sqrt(n3)) if n3 else 0
@@ -563,7 +562,7 @@ def zfocus_html(con, cfg):
         else:
             ok1, ok2 = z3 >= pr["z_threshold"], b3 >= pr["big_needed"]
             v3 = ("ĐẠT" if ok1 or ok2 else "KHÔNG ĐẠT") + f" sau {n3:,} kỳ (TB: {'đạt' if ok1 else 'không'} · trúng lớn: {'đạt' if ok2 else 'không'})."
-        h3 = f"""<div class="head"><b>Giả thuyết 3 (ghi {e_(pr['registered'])}):</b> {e_(en)} đoán tốt hơn may rủi. Mẫu {pr['n_target']:,} kỳ live tính từ kỳ đầu tiên sau {e_(pr['start_time'])} PT.
+        h3 = f"""<div class="head"><b>Giả thuyết 3 (ghi {e_(pr['registered'])}):</b> {e_(en)} đoán tốt hơn may rủi. Mẫu {pr['n_target']:,} kỳ (vé khóa trước kỳ quay: live + walk-forward) tính từ kỳ đầu tiên sau {e_(pr['start_time'])} PT.
 Đạt nếu (a) TB trúng vé 10 số có z ≥ {pr['z_threshold']} <b>hoặc</b> (b) có ≥ {pr['big_needed']} lần trúng ≥{pr['big_min']}/10 (may rủi cho ~{p7*pr['n_target']:.1f}).</div>
 <div style="background:var(--line);border-radius:4px;height:10px;margin:8px 0"><div style="width:{min(100, n3 / pr['n_target'] * 100):.1f}%;height:10px;border-radius:4px;background:var(--green)"></div></div>
 <div class="kpis"><div><span>H3 · TB trúng</span><b>{m3:.3f}</b><em>{n3:,} kỳ · z {z3:+.2f}</em></div>
