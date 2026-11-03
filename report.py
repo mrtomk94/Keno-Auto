@@ -584,6 +584,148 @@ def zfocus_html(con, cfg):
 {labrow}"""
 
 
+
+BIG_PAY = 40   # a "big hit" = a $1 ticket that pays $40 or more (10-spot 7/10, 5-spot 5/5, 6-spot 5/6, ...)
+
+
+def archive(con):
+    """Full history of scored tickets, grouped by day / week / month, plus every big hit.
+    Writes logs/days/YYYY-MM-DD.json (+ .csv) and logs/archive/*.csv; returns what the page shows."""
+    names = list(engines.ENGINES)
+    when = {}
+    for did, ds, nums, be in con.execute("""SELECT d.draw_id, d.draw_date, d.numbers, d.bullseye FROM draws d
+                                             WHERE d.draw_id IN (SELECT DISTINCT target_draw FROM results WHERE valid=1)"""):
+        ms = draw_epoch(ds)
+        if ms:
+            when[did] = (dt.datetime.fromtimestamp(ms / 1000, _PT), json.loads(nums), be)
+    per_draw, big = {}, []
+    for t, en, sp, h, beh, hs, bp, kind in con.execute(
+            """SELECT r.target_draw, r.engine, r.spot, r.hits, r.bullseye_hit, r.pay_hotspot, r.pay_bullseye, p.kind
+               FROM results r LEFT JOIN predictions p ON p.target_draw=r.target_draw AND p.engine=r.engine
+               WHERE r.valid=1"""):
+        if t not in when:
+            continue
+        if sp == 10:
+            d = per_draw.setdefault(t, {"k": kind or "", "h": {}, "be": {}})
+            d["h"][en] = h
+            d["be"][en] = beh
+        if (hs or 0) >= BIG_PAY:
+            big.append((t, en, sp, h, beh, hs, bp))
+    # group
+    def keys(w):
+        d = w.date()
+        mon = d - dt.timedelta(days=d.weekday())
+        return d.isoformat(), mon.isoformat(), d.strftime("%Y-%m")
+    groups = {"day": {}, "week": {}, "month": {}}
+    for t, d in per_draw.items():
+        w = when[t][0]
+        for g, k in zip(("day", "week", "month"), keys(w)):
+            G = groups[g].setdefault(k, {"n": 0, "sum": {}, "cnt": {}, "big7": 0, "best": (0, "", 0)})
+            G["n"] += 1
+            for en, h in d["h"].items():
+                G["sum"][en] = G["sum"].get(en, 0) + h
+                G["cnt"][en] = G["cnt"].get(en, 0) + 1
+                if h >= 7:
+                    G["big7"] += 1
+                if h > G["best"][0]:
+                    G["best"] = (h, en, t)
+    # files
+    logdir = os.path.join(HERE, "logs")
+    os.makedirs(os.path.join(logdir, "days"), exist_ok=True)
+    os.makedirs(os.path.join(logdir, "archive"), exist_ok=True)
+    by_day = {}
+    for t in sorted(per_draw):
+        by_day.setdefault(when[t][0].date().isoformat(), []).append(t)
+    for day, ts in by_day.items():
+        rows = [{"d": t, "t": when[t][0].strftime("%I:%M %p").lstrip("0"), "k": per_draw[t]["k"][:1],
+                 "n": when[t][1], "b": when[t][2], "h": [per_draw[t]["h"].get(en) for en in names],
+                 "e": [per_draw[t]["be"].get(en, 0) for en in names]} for t in ts]
+        with open(os.path.join(logdir, "days", f"{day}.json"), "w", encoding="utf-8") as f:
+            json.dump({"day": day, "engines": names, "rows": rows}, f, separators=(",", ":"))
+        with open(os.path.join(logdir, "days", f"{day}.csv"), "w", encoding="utf-8") as f:
+            f.write("draw_id,time_pt,ticket,numbers,bullseye," + ",".join(names) + "\n")
+            for r in rows:
+                f.write(f"{r['d']},{r['t']},{'live' if r['k'] == 'l' else 'walk-forward'},{' '.join(map(str, r['n']))},{r['b'] or ''},"
+                        + ",".join("" if x is None else str(x) for x in r["h"]) + "\n")
+    for g, G in groups.items():
+        with open(os.path.join(logdir, "archive", f"{ {'day': 'daily', 'week': 'weekly', 'month': 'monthly'}[g] }.csv"), "w", encoding="utf-8") as f:
+            f.write("period,draws,hits_ge7," + ",".join(names) + ",best_hit,best_engine,best_draw\n")
+            for k in sorted(G):
+                v = G[k]
+                f.write(f"{k},{v['n']},{v['big7']}," + ",".join(f"{v['sum'][e]/v['cnt'][e]:.3f}" if v["cnt"].get(e) else "" for e in names)
+                        + f",{v['best'][0]},{v['best'][1]},{v['best'][2]}\n")
+    big.sort(key=lambda x: (-x[0], x[1], x[2]))
+    with open(os.path.join(logdir, "archive", "big_hits.csv"), "w", encoding="utf-8") as f:
+        f.write("draw_id,date_pt,time_pt,engine,spot,hits,bullseye_hit,prize_per_$1,bullseye_prize\n")
+        for t, en, sp, h, beh, hs, bp in big:
+            w = when[t][0]
+            f.write(f"{t},{w:%Y-%m-%d},{w:%I:%M %p},{en},{sp},{h},{beh},{hs:.0f},{(bp or 0):.0f}\n")
+    return {"groups": groups, "big": big, "when": when, "days": sorted(by_day), "names": names,
+            "today": by_day and json.load(open(os.path.join(logdir, "days", f"{max(by_day)}.json"), encoding="utf-8"))}
+
+
+def archive_html(A):
+    e_ = html.escape
+    names = A["names"]
+    sd = math.sqrt(10 * .25 * .75 * 70 / 79)
+
+    def table(g, label, fmt):
+        G = A["groups"][g]
+        if not G:
+            return "<p class='muted'>Chưa có dữ liệu.</p>"
+        head = f"<tr><th>{label}</th><th>Kỳ</th><th>≥7/10</th>" + "".join(f"<th style='color:{COLORS.get(n)}'>{n}</th>" for n in names) + "<th>Cao nhất</th></tr>"
+        body = []
+        for k in sorted(G, reverse=True):
+            v = G[k]
+            cells = []
+            avgs = {n: v["sum"][n] / v["cnt"][n] for n in names if v["cnt"].get(n)}
+            top = max(avgs, key=avgs.get) if avgs else None
+            for n in names:
+                if n not in avgs:
+                    cells.append("<td class='muted'>—</td>")
+                    continue
+                z = (avgs[n] - 2.5) / (sd / math.sqrt(v["cnt"][n]))
+                cls = "good" if z >= 2 else ("bad" if z <= -2 else "")
+                cells.append(f"<td class='{cls}'>{'<b>' if n == top else ''}{avgs[n]:.2f}{'</b>' if n == top else ''}</td>")
+            b = v["best"]
+            body.append(f"<tr><td>{fmt(k)}</td><td>{v['n']:,}</td><td>{v['big7']}</td>{''.join(cells)}"
+                        f"<td>{b[0]}/10 <span style='color:{COLORS.get(b[1])}'>{e_(b[1])}</span></td></tr>")
+        return f"<div class='scroll tall'><table>{head}{''.join(body)}</table></div>"
+
+    def wk(k):
+        a = dt.date.fromisoformat(k)
+        return f"{a:%d/%m}–{a + dt.timedelta(days=6):%d/%m}"
+    days_opts = "".join(f"<option value='{d}'>{d[8:10]}/{d[5:7]}/{d[:4]}</option>" for d in reversed(A["days"]))
+    big_rows = "".join(
+        f"<tr data-e='{e_(en)}' data-s='{sp}'><td>#{t}</td><td>{A['when'][t][0]:%d/%m %I:%M %p}</td>"
+        f"<td style='color:{COLORS.get(en)}'>{e_(en)}</td><td>{sp} số</td><td class='{'big' if h == sp or (sp == 10 and h >= 8) else ''}'>{h}/{sp}</td>"
+        f"<td>${hs:,.0f}</td><td>{'✓ $' + format(bp, ',.0f') if beh else ''}</td></tr>"
+        for t, en, sp, h, beh, hs, bp in A["big"][:1500])
+    eng_opts = "".join(f"<option>{n}</option>" for n in names)
+    n_big = len(A["big"])
+    return f"""<div class="subtabs" id="lt">
+<button data-v="draws" class="on">Từng kỳ</button><button data-v="day">Ngày</button><button data-v="week">Tuần</button>
+<button data-v="month">Tháng</button><button data-v="big">Trúng cao ({n_big:,})</button><button data-v="dl">Tải về</button></div>
+<div class="lv" id="lv-draws">
+<div class="row"><label>Ngày <select id="logday">{days_opts}</select></label><span class="muted" id="loginfo"></span></div>
+<div class="scroll tall" id="logbox"></div>
+<p class="note">Số trúng trên vé 10 số của từng engine. Ô xanh = trúng ≥ 6/10 · ★ = trúng cả Bulls-Eye. L = vé khóa trực tiếp, W = walk-forward (vé tạo từ các kỳ trước, chấm khi dữ liệu về theo lô).</p></div>
+<div class="lv" id="lv-day">{table('day', 'Ngày', lambda k: f"{k[8:10]}/{k[5:7]}")}<p class="note">TB số trúng vé 10 số theo ngày (kỳ vọng 2.50). Số đậm = engine tốt nhất ngày đó · xanh/đỏ = z ≥ 2 / ≤ −2.</p></div>
+<div class="lv" id="lv-week">{table('week', 'Tuần (T2–CN)', wk)}<p class="note">Tuần tính từ thứ Hai đến Chủ nhật, giờ Pacific.</p></div>
+<div class="lv" id="lv-month">{table('month', 'Tháng', lambda k: f"{k[5:7]}/{k[:4]}")}</div>
+<div class="lv" id="lv-big">
+<div class="row"><label>Engine <select id="bige"><option value="">Tất cả</option>{eng_opts}</select></label>
+<label>Vé <select id="bigs"><option value="">Mọi loại</option>{''.join(f'<option value="{k}">{k} số</option>' for k in range(5, 11))}</select></label><span class="muted" id="bigcount"></span></div>
+<div class="scroll tall"><table id="bigt"><tr><th>Kỳ</th><th>Giờ (PT)</th><th>Engine</th><th>Vé</th><th>Trúng</th><th>Thắng/$1</th><th>Bulls-Eye</th></tr>{big_rows}</table></div>
+<p class="note">Mọi vé $1 thắng từ ${BIG_PAY} trở lên, tất cả engine và loại vé 5–10 số, mới nhất ở trên.</p></div>
+<div class="lv" id="lv-dl"><h2>Tải dữ liệu (CSV, mở bằng Excel)</h2>
+<div class="dl"><a href="logs/archive/daily.csv">📅 Tổng kết theo ngày</a><a href="logs/archive/weekly.csv">🗓️ Theo tuần</a>
+<a href="logs/archive/monthly.csv">📆 Theo tháng</a><a href="logs/archive/big_hits.csv">🏆 Tất cả lần trúng cao</a><a id="daycsv" href="#">📒 Nhật ký từng kỳ của ngày đang chọn</a>
+<a href="draws/">🎱 Kết quả quay mỗi ngày (thư mục)</a></div>
+<p class="note">Các file được tạo lại sau mỗi lần GitHub chạy, từ toàn bộ dữ liệu trong keno.db — không mất ngày nào.</p></div>
+<script type="application/json" id="logtoday">{json.dumps(A['today'] or {}, separators=(',', ':'))}</script>"""
+
+
 def lab_html(con, cfg):
     """Engine lab: 10 versions per family, scored like everything else."""
     if not cfg.get("lab", True):
@@ -661,7 +803,7 @@ html[data-dev=fold] .kpis{grid-template-columns:repeat(3,minmax(0,1fr))}
 html[data-dev=fold] .ball{width:40px;height:40px;font-size:16px}
 html[data-dev=fold] .others{grid-template-columns:repeat(2,minmax(0,1fr))}
 html[data-dev=fold] table{font-size:12px}
-.zgrid{display:grid;grid-template-columns:repeat(auto-fit,minmax(260px,1fr));gap:0 14px}.zgrid>div{min-width:0}.up{grid-template-columns:minmax(0,1fr)}.stale{font-size:11.5px;color:var(--amber);margin:4px 0 2px}.grp{min-width:0}.pane{min-width:0}
+.subtabs{display:flex;gap:4px;flex-wrap:wrap;margin:10px 0 8px}.subtabs button{background:var(--panel);color:var(--muted);border:1px solid var(--line);border-radius:14px;padding:4px 12px;font:inherit;font-size:12.5px;cursor:pointer}.subtabs button.on{color:var(--green);border-color:var(--green)}.lv{display:none}.row{display:flex;flex-wrap:wrap;gap:10px;align-items:center;margin-bottom:8px;font-size:12.5px}.row select{background:var(--panel);color:var(--fg);border:1px solid var(--line);border-radius:4px;padding:3px 6px;font:inherit}.scroll.tall{max-height:calc(100dvh - 250px)}td.good{color:var(--green)}td.bad{color:var(--red)}tr.sum td{font-weight:700;border-top:2px solid var(--line)}.dl{display:grid;grid-template-columns:repeat(auto-fit,minmax(240px,1fr));gap:8px}.dl a{background:var(--panel);border:1px solid var(--line);border-radius:6px;padding:12px;color:var(--fg);text-decoration:none}.dl a:hover{border-color:var(--green)}.zgrid{display:grid;grid-template-columns:repeat(auto-fit,minmax(260px,1fr));gap:0 14px}.zgrid>div{min-width:0}.up{grid-template-columns:minmax(0,1fr)}.stale{font-size:11.5px;color:var(--amber);margin:4px 0 2px}.grp{min-width:0}.pane{min-width:0}
 html[data-dev=phone] .ball{width:27px;height:27px;font-size:12.5px;border-width:1.5px}
 html[data-dev=phone] .sug{gap:3px}html[data-dev=phone] .scroll{max-height:56dvh}
 /* fallback khi chưa chạy JS */
@@ -699,6 +841,43 @@ TAB_JS = r"""<script>
   if(j>=0&&j<tabs.length)show(tabs[j].dataset.t)},{passive:true});
  // tự tải lại mỗi 3 phút khi đang mở trang (giữ nguyên tab đang xem)
  setInterval(function(){if(!document.hidden)location.reload()},180000);
+})();
+</script>"""
+
+LOG_JS = r"""<script>
+(function(){
+ var C = JSON.parse(document.getElementById('colors').textContent);
+ document.querySelectorAll('#lt button').forEach(function(b){ b.onclick = function(){
+   document.querySelectorAll('#lt button').forEach(function(x){ x.classList.toggle('on', x === b); });
+   document.querySelectorAll('.lv').forEach(function(v){ v.style.display = v.id === 'lv-' + b.dataset.v ? 'block' : 'none'; });
+   try { localStorage.setItem('keno-logview', b.dataset.v); } catch(e) {} }; });
+ var saved = null; try { saved = localStorage.getItem('keno-logview'); } catch(e) {}
+ var sb = document.querySelector('#lt button[data-v="' + (saved || 'draws') + '"]') || document.querySelector('#lt button');
+ sb.click();
+ function render(D){
+   var box = document.getElementById('logbox'), info = document.getElementById('loginfo');
+   if (!D || !D.rows) { box.innerHTML = '<p class="muted" style="padding:10px">Không tải được ngày này.</p>'; return; }
+   var h = '<table><tr><th>Kỳ</th><th>Giờ</th><th></th>' + D.engines.map(function(e){ return '<th style="color:' + (C[e]||'') + '">' + e + '</th>'; }).join('') + '</tr>';
+   var rows = D.rows.slice().reverse(), sums = {}, cnt = {};
+   rows.forEach(function(r){
+     h += '<tr><td>#' + r.d + '</td><td>' + r.t + '</td><td class="muted">' + (r.k === 'l' ? 'L' : 'W') + '</td>' + r.h.map(function(x, i){
+       if (x === null || x === undefined) return '<td class="muted">—</td>';
+       sums[i] = (sums[i] || 0) + x; cnt[i] = (cnt[i] || 0) + 1;
+       return '<td' + (x >= 6 ? ' class="big"' : '') + '>' + x + (r.e[i] ? '★' : '') + '</td>'; }).join('') + '</tr>'; });
+   h += '<tr class="sum"><td colspan="3">TB ngày</td>' + D.engines.map(function(e, i){ return '<td>' + (cnt[i] ? (sums[i]/cnt[i]).toFixed(2) : '—') + '</td>'; }).join('') + '</tr></table>';
+   box.innerHTML = h; info.textContent = D.rows.length + ' kỳ';
+   document.getElementById('daycsv').href = 'logs/days/' + D.day + '.csv';
+ }
+ var today = JSON.parse(document.getElementById('logtoday').textContent || '{}'), sel = document.getElementById('logday');
+ render(today);
+ sel.onchange = function(){
+   if (today.day === sel.value) return render(today);
+   document.getElementById('logbox').innerHTML = '<p class="muted" style="padding:10px">Đang tải…</p>';
+   fetch('logs/days/' + sel.value + '.json', {cache: 'no-store'}).then(function(r){ return r.json(); }).then(render).catch(function(){ render(null); }); };
+ function filt(){ var e = document.getElementById('bige').value, s = document.getElementById('bigs').value, n = 0;
+   document.querySelectorAll('#bigt tr[data-e]').forEach(function(tr){ var ok = (!e || tr.dataset.e === e) && (!s || tr.dataset.s === s); tr.style.display = ok ? '' : 'none'; if (ok) n++; });
+   document.getElementById('bigcount').textContent = n + ' lần'; }
+ document.getElementById('bige').onchange = filt; document.getElementById('bigs').onchange = filt; filt();
 })();
 </script>"""
 
@@ -859,6 +1038,7 @@ mỗi vé $1 trung bình chỉ trả lại khoảng 62¢.</p>
                 f"<th>Thắng lớn nhất / $1</th></tr>{''.join(log_rows)}</table></div>"
                 "<p class='note'>Ô xanh = trúng ≥ 6/10. Kỳ vọng ngẫu nhiên 2.5/10.</p>")
 
+    A = archive(con)
     tt_html = time_html(con, list(engines.ENGINES))
     wallet = wallet_html(con, cfg)
     lm = kdb.meta_get(con, "learned_model")
@@ -904,14 +1084,14 @@ td.big{{color:#05100b;background:var(--green);font-weight:700}}
 <details class="meta"><summary>Cập nhật {kdb.now_str()} · {live[0] + hist_n[0]:,} kỳ</summary>
 <div class="muted">{live[0]:,} kỳ log tự động (mới nhất {e(str(live[1]))}) · {imported:,} kỳ cũ nhập · {hist_n[0]:,} kỳ lịch sử tải ngược{(' (từ ' + e(str(hist_n[1])) + ')') if hist_n[0] else ''} · trạng thái: {e(str(status.get('state','?')))} ({e(str(status.get('mode','')))}{' · GitHub' if status.get('runner')=='github' else ''})<br>{e(kinds_txt)}</div></details>
 <nav class="tabs" id="tabs">
-<button data-t="sug">🎯 Gợi ý</button><button data-t="zf">🔲 {e(cfg.get('focus_engine') or 'Theo dõi')}</button><button data-t="log">📒 Nhật ký</button><button data-t="eng">🏁 Engine</button>
+<button data-t="sug">🎯 Gợi ý</button><button data-t="zf">🔲 {e(cfg.get('focus_engine') or 'Theo dõi')}</button><button data-t="log">📒 Nhật ký & lưu trữ</button><button data-t="eng">🏁 Engine</button>
 <button data-t="pre">🧪 Kiểm định</button><button data-t="wal">💵 Ví ảo</button><button data-t="rnd">🎲 Ngẫu nhiên</button>
 <button data-t="lab">🔬 Lab</button><button data-t="time">🕒 Giờ & ngày</button><button data-t="ai">🧠 AI học</button>
 </nav></header>
 <main>
 <section class="pane" id="t-sug">{upcoming_html}</section>
 <section class="pane" id="t-zf">{zfocus_html(con, cfg)}</section>
-<section class="pane" id="t-log">{log_html}</section>
+<section class="pane" id="t-log">{archive_html(A)}</section>
 <section class="pane" id="t-eng">
 <div class="head">{e(head)}</div>
 <h2>Bảng điểm engine (chỉ vé khóa trước kỳ quay)</h2>
@@ -929,7 +1109,9 @@ td.big{{color:#05100b;background:var(--green);font-weight:700}}
 <div class="scroll"><table><tr><th>Ngày</th><th>Kỳ log</th><th>Bỏ lỡ</th><th>Kỳ chấm</th>{''.join(f'<th>{n}</th>' for n in names)}</tr>{''.join(day_rows)}</table></div>
 </section>
 <section class="pane" id="t-ai">{learned_html}<h2>PATTERN · AI học được gì</h2>{model_html}</section>
+<script type="application/json" id="colors">{json.dumps(COLORS)}</script>
 {UP_JS}
+{LOG_JS}
 {TAB_JS}
 </main></body></html>"""
     path = os.path.join(OUT, "latest.html")
