@@ -599,16 +599,24 @@ def archive(con):
         if ms:
             when[did] = (dt.datetime.fromtimestamp(ms / 1000, _PT), json.loads(nums), be)
     per_draw, big = {}, []
+    W = {}   # wallet aggregates: W[day][engine][spot] = [tickets, $ back without BE, $ back with BE]
     for t, en, sp, h, beh, hs, bp, kind in con.execute(
             """SELECT r.target_draw, r.engine, r.spot, r.hits, r.bullseye_hit, r.pay_hotspot, r.pay_bullseye, p.kind
                FROM results r LEFT JOIN predictions p ON p.target_draw=r.target_draw AND p.engine=r.engine
                WHERE r.valid=1"""):
         if t not in when:
             continue
+        hs, bp = hs or 0, bp or 0
+        wd = W.setdefault(when[t][0].date().isoformat(), {}).setdefault(en, {}).setdefault(str(sp), [0, 0, 0])
+        wd[0] += 1
+        wd[1] += hs
+        wd[2] += bp if beh else hs          # $2 ticket with Bulls-Eye: BE prize replaces the base prize when it hits
         if sp == 10:
-            d = per_draw.setdefault(t, {"k": kind or "", "h": {}, "be": {}})
+            d = per_draw.setdefault(t, {"k": kind or "", "h": {}, "be": {}, "p": {}, "pb": {}})
             d["h"][en] = h
             d["be"][en] = beh
+            d["p"][en] = hs
+            d["pb"][en] = bp if beh else hs
         if (hs or 0) >= BIG_PAY:
             big.append((t, en, sp, h, beh, hs, bp))
     # group
@@ -639,14 +647,17 @@ def archive(con):
     for day, ts in by_day.items():
         rows = [{"d": t, "t": when[t][0].strftime("%I:%M %p").lstrip("0"), "k": per_draw[t]["k"][:1],
                  "n": when[t][1], "b": when[t][2], "h": [per_draw[t]["h"].get(en) for en in names],
-                 "e": [per_draw[t]["be"].get(en, 0) for en in names]} for t in ts]
+                 "e": [per_draw[t]["be"].get(en, 0) for en in names],
+                 "p": [per_draw[t]["p"].get(en, 0) for en in names],
+                 "q": [per_draw[t]["pb"].get(en, 0) for en in names]} for t in ts]
         with open(os.path.join(logdir, "days", f"{day}.json"), "w", encoding="utf-8") as f:
             json.dump({"day": day, "engines": names, "rows": rows}, f, separators=(",", ":"))
         with open(os.path.join(logdir, "days", f"{day}.csv"), "w", encoding="utf-8") as f:
-            f.write("draw_id,time_pt,ticket,numbers,bullseye," + ",".join(names) + "\n")
+            f.write("draw_id,time_pt,ticket,numbers,bullseye," + ",".join(names) + ",best_prize_$1_10spot,best_engine\n")
             for r in rows:
+                bi = max(range(len(names)), key=lambda i: r["p"][i] or 0)
                 f.write(f"{r['d']},{r['t']},{'live' if r['k'] == 'l' else 'walk-forward'},{' '.join(map(str, r['n']))},{r['b'] or ''},"
-                        + ",".join("" if x is None else str(x) for x in r["h"]) + "\n")
+                        + ",".join("" if x is None else str(x) for x in r["h"]) + f",{r['p'][bi] or 0:.0f},{names[bi] if r['p'][bi] else ''}\n")
     for g, G in groups.items():
         with open(os.path.join(logdir, "archive", f"{ {'day': 'daily', 'week': 'weekly', 'month': 'monthly'}[g] }.csv"), "w", encoding="utf-8") as f:
             f.write("period,draws,hits_ge7," + ",".join(names) + ",best_hit,best_engine,best_draw\n")
@@ -660,7 +671,7 @@ def archive(con):
         for t, en, sp, h, beh, hs, bp in big:
             w = when[t][0]
             f.write(f"{t},{w:%Y-%m-%d},{w:%I:%M %p},{en},{sp},{h},{beh},{hs:.0f},{(bp or 0):.0f}\n")
-    return {"groups": groups, "big": big, "when": when, "days": sorted(by_day), "names": names,
+    return {"groups": groups, "big": big, "when": when, "days": sorted(by_day), "names": names, "wallet": W,
             "today": by_day and json.load(open(os.path.join(logdir, "days", f"{max(by_day)}.json"), encoding="utf-8"))}
 
 
@@ -709,7 +720,7 @@ def archive_html(A):
 <div class="lv" id="lv-draws">
 <div class="row"><label>Ngày <select id="logday">{days_opts}</select></label><span class="muted" id="loginfo"></span></div>
 <div class="scroll tall" id="logbox"></div>
-<p class="note">Số trúng trên vé 10 số của từng engine. Ô xanh = trúng ≥ 6/10 · ★ = trúng cả Bulls-Eye. L = vé khóa trực tiếp, W = walk-forward (vé tạo từ các kỳ trước, chấm khi dữ liệu về theo lô).</p></div>
+<p class="note"><b>Thắng cao nhất</b> = giải lớn nhất trong 14 vé 10 số $1 của kỳ đó · <b>Gợi ý</b> = vé $1 của engine gợi ý thắng bao nhiêu (dòng cuối: tổng thắng / tiền bỏ ra cả ngày). Các cột engine = số trúng / 10. Ô xanh = trúng ≥ 6/10 · ★ = trúng cả Bulls-Eye. L = vé khóa trực tiếp, W = walk-forward (vé tạo từ các kỳ trước, chấm khi dữ liệu về theo lô).</p></div>
 <div class="lv" id="lv-day">{table('day', 'Ngày', lambda k: f"{k[8:10]}/{k[5:7]}")}<p class="note">TB số trúng vé 10 số theo ngày (kỳ vọng 2.50). Số đậm = engine tốt nhất ngày đó · xanh/đỏ = z ≥ 2 / ≤ −2.</p></div>
 <div class="lv" id="lv-week">{table('week', 'Tuần (T2–CN)', wk)}<p class="note">Tuần tính từ thứ Hai đến Chủ nhật, giờ Pacific.</p></div>
 <div class="lv" id="lv-month">{table('month', 'Tháng', lambda k: f"{k[5:7]}/{k[:4]}")}</div>
@@ -724,6 +735,27 @@ def archive_html(A):
 <a href="draws/">🎱 Kết quả quay mỗi ngày (thư mục)</a></div>
 <p class="note">Các file được tạo lại sau mỗi lần GitHub chạy, từ toàn bộ dữ liệu trong keno.db — không mất ngày nào.</p></div>
 <script type="application/json" id="logtoday">{json.dumps(A['today'] or {}, separators=(',', ':'))}</script>"""
+
+
+def every_round_html(A, cfg, sug=None):
+    """Fake wallet: bet $1 (or $2 with Bulls-Eye) on the chosen engine's ticket in EVERY scored round.
+    Uses only tickets locked before each draw. The page lets you switch engine / ticket size / Bulls-Eye / start day."""
+    names = A["names"]
+    focus = next((x for x in (cfg.get("focus_engine"), sug) if x in names), "RANDOM")
+    opts = "".join(f"<option value='{n}'{' selected' if n == focus else ''}>{n}</option>" for n in names)
+    days = sorted(A["wallet"])
+    dopts = "".join(f"<option value='{d}'>{d[8:10]}/{d[5:7]}/{d[:4]}</option>" for d in days)
+    return f"""<div class="row"><label>Engine <select id="wv-e"><option value="*">Tất cả {len(names)} engine (1 vé mỗi engine)</option>{opts}</select></label>
+<label>Từ ngày <select id="wv-d">{dopts}</select></label>
+<label><input type="checkbox" id="wv-b"> Bulls-Eye (+$1/vé)</label></div>
+<div class="spots" id="wv-s">{''.join(f'<button data-k="{k}" class="{"on" if k == 10 else ""}">{k} số</button>' for k in range(5, 11))}</div>
+<div class="kpis" id="wv-k"></div>
+<svg id="wv-c" class="chart" viewBox="0 0 800 170" preserveAspectRatio="none" style="height:170px"></svg>
+<div class="scroll" style="max-height:34dvh;margin-top:8px"><table id="wv-t"></table></div>
+<p class="note">Ví ảo: đặt tiền vào <b>mọi kỳ</b> được chấm, theo đúng vé đã khóa trước kỳ quay (không biết trước kết quả). Không giới hạn tiền mỗi ngày.
+Thắng tính theo bảng trả thưởng Hot Spot cho vé $1; có Bulls-Eye thì vé $2 và giải Bulls-Eye thay cho giải thường khi trúng Bulls-Eye.</p>
+<script type="application/json" id="wvdata">{json.dumps(A['wallet'], separators=(',', ':'))}</script>"""
+
 
 
 def lab_html(con, cfg):
@@ -803,7 +835,7 @@ html[data-dev=fold] .kpis{grid-template-columns:repeat(3,minmax(0,1fr))}
 html[data-dev=fold] .ball{width:40px;height:40px;font-size:16px}
 html[data-dev=fold] .others{grid-template-columns:repeat(2,minmax(0,1fr))}
 html[data-dev=fold] table{font-size:12px}
-.subtabs{display:flex;gap:4px;flex-wrap:wrap;margin:10px 0 8px}.subtabs button{background:var(--panel);color:var(--muted);border:1px solid var(--line);border-radius:14px;padding:4px 12px;font:inherit;font-size:12.5px;cursor:pointer}.subtabs button.on{color:var(--green);border-color:var(--green)}.lv{display:none}.row{display:flex;flex-wrap:wrap;gap:10px;align-items:center;margin-bottom:8px;font-size:12.5px}.row select{background:var(--panel);color:var(--fg);border:1px solid var(--line);border-radius:4px;padding:3px 6px;font:inherit}.scroll.tall{max-height:calc(100dvh - 250px)}td.good{color:var(--green)}td.bad{color:var(--red)}tr.sum td{font-weight:700;border-top:2px solid var(--line)}.dl{display:grid;grid-template-columns:repeat(auto-fit,minmax(240px,1fr));gap:8px}.dl a{background:var(--panel);border:1px solid var(--line);border-radius:6px;padding:12px;color:var(--fg);text-decoration:none}.dl a:hover{border-color:var(--green)}.zgrid{display:grid;grid-template-columns:repeat(auto-fit,minmax(260px,1fr));gap:0 14px}.zgrid>div{min-width:0}.up{grid-template-columns:minmax(0,1fr)}.stale{font-size:11.5px;color:var(--amber);margin:4px 0 2px}.grp{min-width:0}.pane{min-width:0}
+.win{color:var(--amber);font-weight:700}.subtabs{display:flex;gap:4px;flex-wrap:wrap;margin:10px 0 8px}.subtabs button{background:var(--panel);color:var(--muted);border:1px solid var(--line);border-radius:14px;padding:4px 12px;font:inherit;font-size:12.5px;cursor:pointer}.subtabs button.on{color:var(--green);border-color:var(--green)}.lv{display:none}.row{display:flex;flex-wrap:wrap;gap:10px;align-items:center;margin-bottom:8px;font-size:12.5px}.row select{background:var(--panel);color:var(--fg);border:1px solid var(--line);border-radius:4px;padding:3px 6px;font:inherit}.scroll.tall{max-height:calc(100dvh - 250px)}td.good{color:var(--green)}td.bad{color:var(--red)}tr.sum td{font-weight:700;border-top:2px solid var(--line)}.dl{display:grid;grid-template-columns:repeat(auto-fit,minmax(240px,1fr));gap:8px}.dl a{background:var(--panel);border:1px solid var(--line);border-radius:6px;padding:12px;color:var(--fg);text-decoration:none}.dl a:hover{border-color:var(--green)}.zgrid{display:grid;grid-template-columns:repeat(auto-fit,minmax(260px,1fr));gap:0 14px}.zgrid>div{min-width:0}.up{grid-template-columns:minmax(0,1fr)}.stale{font-size:11.5px;color:var(--amber);margin:4px 0 2px}.grp{min-width:0}.pane{min-width:0}
 html[data-dev=phone] .ball{width:27px;height:27px;font-size:12.5px;border-width:1.5px}
 html[data-dev=phone] .sug{gap:3px}html[data-dev=phone] .scroll{max-height:56dvh}
 /* fallback khi chưa chạy JS */
@@ -857,14 +889,22 @@ LOG_JS = r"""<script>
  function render(D){
    var box = document.getElementById('logbox'), info = document.getElementById('loginfo');
    if (!D || !D.rows) { box.innerHTML = '<p class="muted" style="padding:10px">Không tải được ngày này.</p>'; return; }
-   var h = '<table><tr><th>Kỳ</th><th>Giờ</th><th></th>' + D.engines.map(function(e){ return '<th style="color:' + (C[e]||'') + '">' + e + '</th>'; }).join('') + '</tr>';
+   var F = (document.getElementById('focuseng') || {}).textContent || '', fi = D.engines.indexOf(F), tot = 0;
+   function usd(x){ return x ? '$' + Math.round(x).toLocaleString('en-US') : '—'; }
+   var h = '<table><tr><th>Kỳ</th><th>Giờ</th><th></th><th>Thắng cao nhất / $1</th>' + (fi >= 0 ? '<th style="color:' + (C[F]||'') + '">Gợi ý ' + F + '</th>' : '')
+         + D.engines.map(function(e){ return '<th style="color:' + (C[e]||'') + '">' + e + '</th>'; }).join('') + '</tr>';
    var rows = D.rows.slice().reverse(), sums = {}, cnt = {};
    rows.forEach(function(r){
-     h += '<tr><td>#' + r.d + '</td><td>' + r.t + '</td><td class="muted">' + (r.k === 'l' ? 'L' : 'W') + '</td>' + r.h.map(function(x, i){
+     var bi = 0, P = r.p || []; P.forEach(function(v, i){ if ((v || 0) > (P[bi] || 0)) bi = i; });
+     h += '<tr><td>#' + r.d + '</td><td>' + r.t + '</td><td class="muted">' + (r.k === 'l' ? 'L' : 'W') + '</td>';
+     h += '<td class="' + (P[bi] >= 40 ? 'win' : 'muted') + '">' + (P[bi] ? usd(P[bi]) + ' <span style="color:' + (C[D.engines[bi]]||'') + '">' + D.engines[bi] + '</span>' : '—') + '</td>';
+     if (fi >= 0) { var v = P[fi] || 0; tot += v; h += '<td class="' + (v >= 40 ? 'win' : v ? '' : 'muted') + '">' + usd(v) + '</td>'; }
+     h += r.h.map(function(x, i){
        if (x === null || x === undefined) return '<td class="muted">—</td>';
        sums[i] = (sums[i] || 0) + x; cnt[i] = (cnt[i] || 0) + 1;
        return '<td' + (x >= 6 ? ' class="big"' : '') + '>' + x + (r.e[i] ? '★' : '') + '</td>'; }).join('') + '</tr>'; });
-   h += '<tr class="sum"><td colspan="3">TB ngày</td>' + D.engines.map(function(e, i){ return '<td>' + (cnt[i] ? (sums[i]/cnt[i]).toFixed(2) : '—') + '</td>'; }).join('') + '</tr></table>';
+   h += '<tr class="sum"><td colspan="3">Cả ngày</td><td></td>' + (fi >= 0 ? '<td>' + usd(tot) + ' / $' + rows.length + '</td>' : '')
+      + D.engines.map(function(e, i){ return '<td>' + (cnt[i] ? (sums[i]/cnt[i]).toFixed(2) : '—') + '</td>'; }).join('') + '</tr></table>';
    box.innerHTML = h; info.textContent = D.rows.length + ' kỳ';
    document.getElementById('daycsv').href = 'logs/days/' + D.day + '.csv';
  }
@@ -878,6 +918,48 @@ LOG_JS = r"""<script>
    document.querySelectorAll('#bigt tr[data-e]').forEach(function(tr){ var ok = (!e || tr.dataset.e === e) && (!s || tr.dataset.s === s); tr.style.display = ok ? '' : 'none'; if (ok) n++; });
    document.getElementById('bigcount').textContent = n + ' lần'; }
  document.getElementById('bige').onchange = filt; document.getElementById('bigs').onchange = filt; filt();
+})();
+</script>"""
+
+WALLET_JS = r"""<script>
+(function(){
+ var W; try { W = JSON.parse(document.getElementById('wvdata').textContent); } catch(e) { return; }
+ var E = document.getElementById('wv-e'), Dd = document.getElementById('wv-d'), B = document.getElementById('wv-b'), spot = 10;
+ try { var sv = JSON.parse(localStorage.getItem('keno-wv') || '{}'); if (sv.e) E.value = sv.e; if (sv.d && W[sv.d]) Dd.value = sv.d; if (sv.s) spot = sv.s; B.checked = !!sv.b; } catch(e) {}
+ function usd(x){ return (x < 0 ? '−$' : '$') + Math.abs(Math.round(x)).toLocaleString('en-US'); }
+ function render(){
+   try { localStorage.setItem('keno-wv', JSON.stringify({e: E.value, d: Dd.value, s: spot, b: B.checked})); } catch(e) {}
+   document.querySelectorAll('#wv-s button').forEach(function(b){ b.classList.toggle('on', +b.dataset.k === spot); });
+   var cost = B.checked ? 2 : 1, col = B.checked ? 2 : 1, days = Object.keys(W).sort().filter(function(d){ return d >= Dd.value; });
+   var bal = 0, put = 0, back = 0, n = 0, rows = [], pts = [0], best = 0, up = 0;
+   days.forEach(function(d){
+     var tk = 0, bk = 0;
+     Object.keys(W[d]).forEach(function(en){ if (E.value !== '*' && en !== E.value) return; var a = (W[d][en] || {})[spot]; if (!a) return; tk += a[0]; bk += a[col]; });
+     if (!tk) return;
+     n += tk; put += tk * cost; back += bk; bal += bk - tk * cost; pts.push(bal); if (bk - tk * cost > 0) up++;
+     best = Math.max(best, bk - tk * cost);
+     rows.push('<tr><td>' + d.slice(8) + '/' + d.slice(5, 7) + '</td><td>' + tk.toLocaleString() + '</td><td>' + usd(tk * cost) + '</td><td>' + usd(bk) + '</td><td class="' + (bk - tk * cost >= 0 ? 'good' : 'bad') + '">' + (bk - tk * cost >= 0 ? '+' : '') + usd(bk - tk * cost) + '</td><td class="' + (bal >= 0 ? 'good' : 'bad') + '">' + (bal >= 0 ? '+' : '') + usd(bal) + '</td><td>' + (tk ? Math.round(bk / (tk * cost) * 100) : 0) + '%</td></tr>');
+   });
+   var roi = put ? back / put * 100 : 0;
+   document.getElementById('wv-k').innerHTML =
+     '<div><span>Lời / lỗ</span><b style="color:' + (bal >= 0 ? 'var(--green)' : 'var(--red)') + '">' + (bal >= 0 ? '+' : '') + usd(bal) + '</b><em>' + rows.length + ' ngày · ' + up + ' ngày lời</em></div>' +
+     '<div><span>Tiền bỏ ra</span><b>' + usd(put) + '</b><em>' + n.toLocaleString() + ' vé × $' + cost + '</em></div>' +
+     '<div><span>Tiền thắng về</span><b>' + usd(back) + '</b><em>trả về ' + roi.toFixed(1) + '% (lý thuyết ~63%)</em></div>' +
+     '<div><span>Ngày tốt nhất</span><b>' + (best > 0 ? '+' + usd(best) : '—') + '</b><em>trung bình ' + (bal >= 0 ? '+' : '') + usd(rows.length ? bal / rows.length : 0) + '/ngày</em></div>';
+   document.getElementById('wv-t').innerHTML = '<tr><th>Ngày</th><th>Vé</th><th>Bỏ ra</th><th>Thắng về</th><th>Lời/lỗ ngày</th><th>Số dư cộng dồn</th><th>Trả về</th></tr>' + rows.reverse().join('');
+   var svg = document.getElementById('wv-c'), lo = Math.min.apply(null, pts.concat([0])), hi = Math.max.apply(null, pts.concat([0])), r = (hi - lo) || 1;
+   function X(i){ return 10 + i * (780 / Math.max(1, pts.length - 1)); } function Y(v){ return 10 + (hi - v) / r * 150; }
+   svg.innerHTML = '<line x1="10" x2="790" y1="' + Y(0) + '" y2="' + Y(0) + '" class="zero"/>' +
+     '<polyline fill="none" stroke="' + (bal >= 0 ? '#3ddc97' : '#ff6b5b') + '" stroke-width="2.5" points="' + pts.map(function(v, i){ return X(i) + ',' + Y(v); }).join(' ') + '"/>' +
+     '<text x="14" y="' + (Y(0) - 4) + '" class="ax">$0</text><text x="14" y="' + (Y(bal) + (bal < 0 ? 14 : -4)) + '" class="ax">' + usd(bal) + '</text>';
+ }
+ E.onchange = Dd.onchange = B.onchange = render;
+ document.querySelectorAll('#wv-s button').forEach(function(b){ b.onclick = function(){ spot = +b.dataset.k; render(); }; });
+ render();
+ document.querySelectorAll('#wt button').forEach(function(b){ b.onclick = function(){
+   document.querySelectorAll('#wt button').forEach(function(x){ x.classList.toggle('on', x === b); });
+   document.getElementById('wv-all').style.display = b.dataset.v === 'all' ? 'block' : 'none';
+   document.getElementById('wv-old').style.display = b.dataset.v === 'old' ? 'block' : 'none'; }; });
 })();
 </script>"""
 
@@ -1101,7 +1183,8 @@ td.big{{color:#05100b;background:var(--green);font-weight:700}}
 <p class="note">Đường nằm trong dải ±1.96 là bình thường cho may rủi. Một engine có lợi thế thật sẽ đi lên đều đặn và ở lại phía trên.</p>
 </section>
 <section class="pane" id="t-pre">{prereg_html(con, cfg)}</section>
-<section class="pane" id="t-wal">{wallet}</section>
+<section class="pane" id="t-wal"><div class="subtabs" id="wt"><button data-v="all" class="on">Đánh mọi kỳ theo gợi ý</button><button data-v="old">3 ví $100/ngày</button></div>
+<div id="wv-all">{every_round_html(A, cfg, sug)}</div><div id="wv-old" style="display:none">{wallet}</div></section>
 <section class="pane" id="t-rnd"><h2>Máy quay có ngẫu nhiên không?</h2>{rnd_html}</section>
 <section class="pane" id="t-lab">{lab_html(con, cfg)}</section>
 <section class="pane" id="t-time">{tt_html}
@@ -1110,8 +1193,10 @@ td.big{{color:#05100b;background:var(--green);font-weight:700}}
 </section>
 <section class="pane" id="t-ai">{learned_html}<h2>PATTERN · AI học được gì</h2>{model_html}</section>
 <script type="application/json" id="colors">{json.dumps(COLORS)}</script>
+<script type="application/json" id="focuseng">{e(sug or '')}</script>
 {UP_JS}
 {LOG_JS}
+{WALLET_JS}
 {TAB_JS}
 </main></body></html>"""
     path = os.path.join(OUT, "latest.html")
