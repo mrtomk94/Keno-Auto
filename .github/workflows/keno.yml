@@ -1,13 +1,17 @@
-# KenoAuto on GitHub: runs every 30 minutes on GitHub's servers — your PC can stay off.
+# KenoAuto on GitHub: runs on GitHub's servers — your PC can stay off.
+# GitHub's own schedule is unreliable (it can wait hours), so every run starts the next one ~10 minutes later
+# ("Start the next run" step). The schedule below stays as a backup that restarts the chain if it ever stops.
+# To pause everything: Actions → KenoAuto → "..." → Disable workflow.
 # Data lives on the "data" branch (keno.db + one CSV per day). The report is published to GitHub Pages.
 name: KenoAuto
 
 on:
   schedule:
-    - cron: "2,17,32,47 * * * *"   # every 30 min (GitHub may start it a few minutes late — backfill covers that)
+    - cron: "2,17,32,47 * * * *"   # backup only — GitHub often starts these hours late
   workflow_dispatch:          # "Run workflow" button
 
 permissions:
+  actions: write        # lets a run start the next run
   contents: write
   pages: write
   id-token: write
@@ -27,6 +31,9 @@ jobs:
       TZ: America/Los_Angeles
       KENO_BROWSER_CHANNEL: ""
     steps:
+      - name: Note start time
+        run: echo "RUN_START=$(date +%s)" >> "$GITHUB_ENV"
+
       - uses: actions/checkout@v4
 
       - name: Restore saved data from the data branch
@@ -111,6 +118,15 @@ jobs:
       - id: deploy
         uses: actions/deploy-pages@v4
         continue-on-error: true
+
+      - name: Start the next run in ~10 minutes (keeps the page fresh)
+        if: ${{ !cancelled() && github.ref == 'refs/heads/main' }}
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          wait=$(( 600 - ( $(date +%s) - RUN_START ) ))
+          [ "$wait" -gt 0 ] && { echo "waiting ${wait}s"; sleep "$wait"; }
+          gh workflow run "${{ github.workflow }}" --ref main -R "${{ github.repository }}" || echo "could not start the next run — the schedule will restart it"
 
       - name: Fail the run if fetching failed (so you get an email)
         if: steps.run.outcome == 'failure'

@@ -23,7 +23,7 @@
   "past_url": "https://www.calottery.com/en/draw-games/hot-spot/past-winning-numbers",
   "backfill_max_draws": 300,
   "first_run_backfill": 260,
-  "lock_horizon": 12,
+  "lock_horizon": 20,
   "history_per_run": 200,
   "history_target": 60000,
   "history_delay": 0.5,
@@ -70,5 +70,16 @@
     "n_target": 8400,
     "z_threshold": 1.645,
     "registered": "28/10/2026 00:40 PT"
+  },
+  "focus_engine": "Z-BLOCK",
+  "prereg3": {
+    "engine": "Z-BLOCK",
+    "start_time": "2026-11-01 12:00",
+    "after_draw": 3315556,
+    "n_target": 3000,
+    "z_threshold": 1.645,
+    "big_min": 7,
+    "big_needed": 10,
+    "registered": "01/11/2026 01:30 PT · sửa 01/11 22:30: tính cả vé walk-forward"
   }
 }
