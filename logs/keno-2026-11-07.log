@@ -1,0 +1,3 @@
+2026-11-07 07:10:35,048 INFO backfilled 2 of 2 missed draw(s)
+2026-11-07 07:10:35,066 INFO logged 3 new draw(s): 3317470, 3317471, 3317472
+2026-11-07 07:10:42,223 INFO batch done: latest 3317472 (was 3317469), 55372 draws total
