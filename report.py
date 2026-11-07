@@ -531,7 +531,7 @@ def zfocus_html(con, cfg):
     blist = "".join(f"<tr><td>#{d}</td><td>{_short(ds)}</td><td class='{'big' if h >= 7 else ''}'>{h}/10</td><td>{'✓' if be else ''}</td></tr>" for d, h, be, ds in bigs)
     # current ticket
     tk = con.execute("SELECT ranked, basis_draw FROM predictions WHERE engine=? AND kind='live' ORDER BY target_draw DESC LIMIT 1", (en,)).fetchone()
-    balls = "".join(f"<div class='ball'>{x}</div>" for x in json.loads(tk[0])) if tk else ""
+    balls = "".join(f"<div class='ball'>{x}</div>" for x in sorted(json.loads(tk[0])[:10])) if tk else ""
     # lab versions of this family
     labrow = ""
     try:
@@ -964,6 +964,7 @@ WALLET_JS = r"""<script>
 </script>"""
 
 UP_JS = r"""<script>
+function asc(list, k){ return list.slice(0, k).map(Number).sort(function(a, b){ return a - b; }); }
 (function(){
   var D; try { D = JSON.parse(document.getElementById('updata').textContent); } catch(e) { return; }
   var spot = 10; try { spot = +localStorage.getItem('kenoSpot') || 10; } catch(e) {}
@@ -992,10 +993,10 @@ UP_JS = r"""<script>
         return '<span class="chip' + (i === 0 ? ' now' : '') + '">' + lab + '</span>'; }).join('') + '</div>';
       html += '<div class="muted" style="font-size:12px">GỢI Ý · <b style="color:' + D.colors[s] + '">' + s + '</b> · vé ' + spot + ' số · khóa từ kỳ #' + b + '</div>';
       if (stale) html += '<div class="stale">Bộ số mới nhất · dùng tiếp cho các kỳ kế (số kỳ &amp; giờ là ước tính). Bộ mới sẽ thay sau lần chạy GitHub kế tiếp.</div>';
-      html += '<div class="sug">' + p[s].slice(0, spot).map(function(n){ return '<div class="ball">' + n + '</div>'; }).join('') + '</div>';
+      html += '<div class="sug">' + asc(p[s], spot).map(function(n){ return '<div class="ball">' + n + '</div>'; }).join('') + '</div>';
       html += '<div class="spots">' + [5,6,7,8,9,10].map(function(k){ return '<button data-k="' + k + '" class="' + (k === spot ? 'on' : '') + '">' + k + ' số</button>'; }).join('') + '</div>';
       html += '<div class="others">' + D.order.filter(function(e){ return e !== s && p[e]; }).map(function(e){
-        return '<div><b style="color:' + D.colors[e] + '">' + e + '</b>' + p[e].slice(0, spot).join(' ') + '</div>'; }).join('') + '</div></div>';
+        return '<div><b style="color:' + D.colors[e] + '">' + e + '</b>' + asc(p[e], spot).join(' ') + '</div>'; }).join('') + '</div></div>';
     });
     box.innerHTML = html;
     box.querySelectorAll('.spots button').forEach(function(bt){ bt.onclick = function(){ spot = +bt.dataset.k; try { localStorage.setItem('kenoSpot', spot); } catch(e) {} render(); }; });
