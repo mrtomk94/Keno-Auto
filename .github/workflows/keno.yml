@@ -30,6 +30,10 @@ jobs:
     env:
       TZ: America/Los_Angeles
       KENO_BROWSER_CHANNEL: ""
+      # Mật khẩu admin: Settings → Secrets and variables → Actions → New repository secret → KENO_ADMIN_PASSWORD.
+      # Người xem thường chỉ thấy tab Gợi ý; các tab khác được mã hóa bằng mật khẩu này.
+      KENO_ADMIN_PASSWORD: ${{ secrets.KENO_ADMIN_PASSWORD }}
+      KENO_REPO: ${{ github.repository }}
     steps:
       - name: Note start time
         run: echo "RUN_START=$(date +%s)" >> "$GITHUB_ENV"
@@ -99,6 +103,8 @@ jobs:
           git add -A
           git -c user.name="keno-bot" -c user.email="keno-bot@users.noreply.github.com" commit -q -m "data $(date '+%Y-%m-%d %H:%M %Z') · $after draws"
           git push -q -f "https://x-access-token:${{ github.token }}@github.com/${{ github.repository }}.git" data
+          # GitHub Pages only gets the report page — no database, CSV, logs or archived reports
+          cd .. && rm -rf pages && mkdir pages && cp site/index.html pages/ && touch pages/.nojekyll
 
       - name: Keep the schedule alive (GitHub pauses schedules after 60 days without commits)
         run: |
@@ -114,7 +120,7 @@ jobs:
         continue-on-error: true
       - uses: actions/upload-pages-artifact@v3
         with:
-          path: site
+          path: pages
       - id: deploy
         uses: actions/deploy-pages@v4
         continue-on-error: true
