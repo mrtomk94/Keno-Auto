@@ -12,6 +12,9 @@ import kdb
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 OUT = os.path.join(HERE, "reports")
+_REPO = os.environ.get("KENO_REPO", "")  # "owner/repo" — set by the workflow; links then point at the data branch
+RAW = f"https://raw.githubusercontent.com/{_REPO}/data/" if _REPO else ""
+DRAWS = f"https://github.com/{_REPO}/tree/data/draws" if _REPO else "draws/"
 COLORS = {"RANDOM": "#8b98a3", "HOT": "#ff6b5b", "GAP": "#f5a524", "CLUSTER": "#3ddc97",
           "BLOCK": "#2196c9", "MARKOV": "#a78bfa", "PATTERN": "#f472b6", "DEVIATION": "#e5e7eb", "LEARNED": "#facc15",
           "Z-HOT": "#fb923c", "Z-COLD": "#38bdf8", "Z-LAST": "#c084fc", "Z-BLOCK": "#4ade80", "Z-MID": "#f9a8d4"}
@@ -730,9 +733,9 @@ def archive_html(A):
 <div class="scroll tall"><table id="bigt"><tr><th>Kỳ</th><th>Giờ (PT)</th><th>Engine</th><th>Vé</th><th>Trúng</th><th>Thắng/$1</th><th>Bulls-Eye</th></tr>{big_rows}</table></div>
 <p class="note">Mọi vé $1 thắng từ ${BIG_PAY} trở lên, tất cả engine và loại vé 5–10 số, mới nhất ở trên.</p></div>
 <div class="lv" id="lv-dl"><h2>Tải dữ liệu (CSV, mở bằng Excel)</h2>
-<div class="dl"><a href="logs/archive/daily.csv">📅 Tổng kết theo ngày</a><a href="logs/archive/weekly.csv">🗓️ Theo tuần</a>
-<a href="logs/archive/monthly.csv">📆 Theo tháng</a><a href="logs/archive/big_hits.csv">🏆 Tất cả lần trúng cao</a><a id="daycsv" href="#">📒 Nhật ký từng kỳ của ngày đang chọn</a>
-<a href="draws/">🎱 Kết quả quay mỗi ngày (thư mục)</a></div>
+<div class="dl"><a href="{RAW}logs/archive/daily.csv">📅 Tổng kết theo ngày</a><a href="{RAW}logs/archive/weekly.csv">🗓️ Theo tuần</a>
+<a href="{RAW}logs/archive/monthly.csv">📆 Theo tháng</a><a href="{RAW}logs/archive/big_hits.csv">🏆 Tất cả lần trúng cao</a><a id="daycsv" href="#" data-base="{RAW}">📒 Nhật ký từng kỳ của ngày đang chọn</a>
+<a href="{DRAWS}">🎱 Kết quả quay mỗi ngày (thư mục)</a></div>
 <p class="note">Các file được tạo lại sau mỗi lần GitHub chạy, từ toàn bộ dữ liệu trong keno.db — không mất ngày nào.</p></div>
 <script type="application/json" id="logtoday">{json.dumps(A['today'] or {}, separators=(',', ':'))}</script>"""
 
@@ -906,7 +909,7 @@ LOG_JS = r"""<script>
    h += '<tr class="sum"><td colspan="3">Cả ngày</td><td></td>' + (fi >= 0 ? '<td>' + usd(tot) + ' / $' + rows.length + '</td>' : '')
       + D.engines.map(function(e, i){ return '<td>' + (cnt[i] ? (sums[i]/cnt[i]).toFixed(2) : '—') + '</td>'; }).join('') + '</tr></table>';
    box.innerHTML = h; info.textContent = D.rows.length + ' kỳ';
-   document.getElementById('daycsv').href = 'logs/days/' + D.day + '.csv';
+   var dc = document.getElementById('daycsv'); dc.href = (dc.dataset.base || '') + 'logs/days/' + D.day + '.csv';
  }
  var today = JSON.parse(document.getElementById('logtoday').textContent || '{}'), sel = document.getElementById('logday');
  render(today);
@@ -1200,6 +1203,18 @@ td.big{{color:#05100b;background:var(--green);font-weight:700}}
 {WALLET_JS}
 {TAB_JS}
 </main></body></html>"""
+    import gate
+    gm = gate.mode()
+    if gm != "full":
+        # Người xem thường chỉ thấy tab Gợi ý; toàn bộ báo cáo được mã hóa, chỉ admin có mật khẩu mới mở được
+        admin_page = page.replace('<span id="dev" class="dev"></span>',
+                                  f'<span style="display:flex;gap:8px;align-items:center"><span id="dev" class="dev"></span>{gate.LOGOUT_BTN}</span>', 1)
+        payload = gate.encrypt(admin_page, gate.password()) if gm == "locked" else None
+        extra = (f"<script type=\"application/json\" id=\"colors\">{json.dumps(COLORS)}</script>\n"
+                 f"<script type=\"application/json\" id=\"focuseng\">{e(sug or '')}</script>\n{UP_JS}\n{TAB_JS}")
+        page = gate.public_page(page, upcoming_html, extra, kdb.now_str(), payload)
+        if gm == "public":
+            print("WARNING: KENO_ADMIN_PASSWORD is not set — published the Suggestion tab only (admin tabs left out).")
     path = os.path.join(OUT, "latest.html")
     with open(path, "w", encoding="utf-8") as f:
         f.write(page)
