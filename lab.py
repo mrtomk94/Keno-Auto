@@ -164,6 +164,9 @@ def on_new_draws(con, cfg, new_ids, prev_max):
         settle(con, d)
     latest = kdb.latest_draw_id(con)
     if latest:
+        # settled lab tickets are no longer needed (their scores stay in lab_res) — keeps keno.db small
+        con.execute("DELETE FROM lab_pred WHERE target_draw < ?", (latest - 5,))
+        con.commit()
         horizon = cfg.get("lock_horizon", 12)
         todo = [t for t in range(latest + 1, latest + horizon + 1)
                 if not con.execute("SELECT 1 FROM lab_pred WHERE target_draw=? LIMIT 1", (t,)).fetchone()]

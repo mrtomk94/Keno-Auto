@@ -916,7 +916,7 @@ LOG_JS = r"""<script>
  sel.onchange = function(){
    if (today.day === sel.value) return render(today);
    document.getElementById('logbox').innerHTML = '<p class="muted" style="padding:10px">Đang tải…</p>';
-   fetch('logs/days/' + sel.value + '.json', {cache: 'no-store'}).then(function(r){ return r.json(); }).then(render).catch(function(){ render(null); }); };
+   fetch((document.getElementById('daycsv').dataset.base || '') + 'logs/days/' + sel.value + '.json', {cache: 'no-store'}).then(function(r){ return r.json(); }).then(render).catch(function(){ render(null); }); };
  function filt(){ var e = document.getElementById('bige').value, s = document.getElementById('bigs').value, n = 0;
    document.querySelectorAll('#bigt tr[data-e]').forEach(function(tr){ var ok = (!e || tr.dataset.e === e) && (!s || tr.dataset.s === s); tr.style.display = ok ? '' : 'none'; if (ok) n++; });
    document.getElementById('bigcount').textContent = n + ' lần'; }
