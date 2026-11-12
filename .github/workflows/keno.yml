@@ -47,8 +47,10 @@ jobs:
           if git ls-remote --exit-code --heads origin data >/dev/null 2>&1; then
             git fetch --depth=1 origin data
             git archive FETCH_HEAD | tar -x -C state
-            test -f state/keno.db || { echo "data branch exists but keno.db is missing — stopping so nothing is overwritten"; exit 1; }
-            cp state/keno.db data/keno.db
+            # the database is stored gzip-compressed (keno.db.gz) — GitHub refuses files over 100 MB
+            if [ -f state/keno.db.gz ]; then gunzip -c state/keno.db.gz > data/keno.db
+            elif [ -f state/keno.db ]; then cp state/keno.db data/keno.db
+            else echo "data branch exists but keno.db is missing — stopping so nothing is overwritten"; exit 1; fi
             [ -d state/draws ] && cp -r state/draws data/draws
             [ -d state/reports ] && cp state/reports/report-*.html reports/ 2>/dev/null || true
             echo "fresh=false" >> "$GITHUB_OUTPUT"
@@ -93,7 +95,10 @@ jobs:
           rm -rf site && mkdir -p site/reports
           cp reports/latest.html site/index.html
           cp reports/*.html site/reports/ 2>/dev/null || true
-          cp reports/summary.json data/keno.db data/status.json site/ 2>/dev/null || true
+          python3 -c "import sqlite3;c=sqlite3.connect('data/keno.db');c.execute('VACUUM');c.close()"
+          gzip -9 -c data/keno.db > site/keno.db.gz
+          echo "keno.db $(du -h data/keno.db | cut -f1) → keno.db.gz $(du -h site/keno.db.gz | cut -f1)"
+          cp reports/summary.json data/status.json site/ 2>/dev/null || true
           [ -d data/draws ] && cp -r data/draws site/draws
           [ -d logs ] && cp -r logs site/logs
           [ -d debug ] && cp -r debug site/debug
